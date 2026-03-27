@@ -1,0 +1,9 @@
+# User config — contains secrets (github_token), never commit this
+config.yaml
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/

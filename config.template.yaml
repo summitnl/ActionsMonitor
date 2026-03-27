@@ -1,0 +1,84 @@
+# =============================================================================
+# Actions Monitor - Configuration File
+# =============================================================================
+#
+# How to edit this file:
+#   - Use a plain text editor (Notepad, VS Code, etc.)
+#   - Indentation uses 2 spaces (do NOT use tabs)
+#   - Lines starting with '#' are comments and are ignored
+#   - After saving, the app will reload the config automatically
+#
+# =============================================================================
+
+# Optional: GitHub personal access token
+# Required for private repositories (the API returns a 404 without one).
+# Without a token you are limited to 60 API requests/hour (per IP).
+# With a token: 5000 requests/hour.
+#
+# Use a classic token. Fine-grained tokens have a precise "Actions: Read" scope, but
+# they require an org admin to allow them first — which may not be the case in your org.
+#
+# Classic tokens have no dedicated "read Actions" scope. The Actions API for private
+# repos falls under the broad 'repo' scope, which grants full repo access. This is more
+# than strictly needed, but the token still only acts on behalf of your own account.
+#
+#   1. Go to https://github.com/settings/tokens
+#   2. Click "Generate new token (classic)"
+#   3. Enable the top-level 'repo' scope
+#   4. Copy the generated token (starts with ghp_) and paste it below
+github_token: ""
+
+# =============================================================================
+# Global Notification Settings
+# These apply to all workflows unless overridden per-workflow below.
+# =============================================================================
+notifications:
+
+  # Notify when a new workflow run starts
+  new_run:
+    enabled: true
+    # Sound options:
+    #   "default"        - use the Windows default notification sound
+    #   "none"           - no sound
+    #   "C:/path/to.wav" - path to a custom .wav file
+    sound: default
+
+  # Notify when a workflow run fails (conclusion: failure, timed_out, etc.)
+  failure:
+    enabled: true
+    sound: default
+
+  # Notify when a workflow run completes successfully
+  success:
+    enabled: true
+    sound: none
+
+# =============================================================================
+# Workflows to Monitor
+# =============================================================================
+# Paste the URL of the GitHub Actions workflow page below.
+# The URL format is:
+#   https://github.com/{owner}/{repo}/actions/workflows/{file}.yml
+#
+# You can also include a branch filter in the URL query string, e.g.:
+#   ?query=branch%3Amain  or  ?query=branch%3Aacceptance
+# The app will extract the branch automatically from the URL.
+# =============================================================================
+workflows:
+
+  # ---------------------------------------------------------------------------
+  # Example workflow entry (remove the leading '#' characters to activate):
+  # ---------------------------------------------------------------------------
+  # - url: https://github.com/owner/repository/actions/workflows/ci.yml
+  #   name: "CI Pipeline"         # Optional: display name (defaults to filename)
+  #   polling_rate: 60            # Optional: polling interval in seconds (default: 60)
+  #   branch: main                # Optional: only monitor runs on this branch
+  #   notifications:              # Optional: override global settings for this workflow
+  #     new_run:
+  #       enabled: false
+  #     failure:
+  #       enabled: true
+  #       sound: default
+  #     success:
+  #       enabled: false
+  # ---------------------------------------------------------------------------
