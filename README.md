@@ -2,12 +2,14 @@
 
 A lightweight Windows tray application that monitors GitHub Actions workflow statuses and notifies you when something changes.
 
-![Status indicators: green = success, orange = running, red = failed]
+![Application window](docs/application.png)
 
 ## Features
 
 - **Live status** — polls your configured workflows and shows green / orange / red status indicators
 - **System tray** — minimises to tray; tray icon colour reflects the worst combined state across all workflows
+
+  ![System tray icon](docs/systemtray.png)
 - **Toast notifications** — notified when a run starts, succeeds, or fails, with an **Open workflow** button that takes you straight to the run
 - **Per-workflow config** — different polling rates, branch filters, and notification overrides per workflow
 - **Hot-reload** — edit `config.yaml` and the app picks up changes within seconds, no restart needed
