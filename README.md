@@ -7,6 +7,7 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 ## Features
 
 - **Live status** — polls your configured workflows and shows green / orange / red status indicators
+- **PR mode** — monitor your own pull request builds: one row per active PR, with branch prefix tags, PR numbers, and a DRAFT indicator. Stale rows auto-remove after a configurable timeout
 - **System tray** — minimises to tray; tray icon colour reflects the worst combined state across all workflows
 
   ![System tray icon](docs/systemtray.png)
@@ -53,6 +54,10 @@ github_token: "ghp_xxxxxxxxxxxxxxxxxxxx"
 
 ### Adding workflows
 
+There are two modes: **branch mode** (default) monitors a specific workflow+branch combo, and **PR mode** monitors your own pull request builds.
+
+#### Branch mode
+
 Paste the workflow URL straight from your browser:
 
 ```yaml
@@ -72,6 +77,24 @@ Branch filters are extracted automatically from the URL query string, or you can
   - url: https://github.com/your-org/your-repo/actions/workflows/ci.yml
     branch: main
 ```
+
+#### PR mode
+
+Set `mode: "pr"` to see one row per active PR you authored. Your GitHub username is auto-detected from the token — no extra config needed.
+
+```yaml
+  - url: https://github.com/your-org/your-repo/actions/workflows/ci.yml
+    name: "CI — My PRs"
+    mode: "pr"
+    polling_rate: 45
+    max_prs: 5             # max PR rows to show (default: 5)
+    pr_stale_after: 300    # seconds before removing a stale row (default: 300)
+```
+
+PR rows show:
+- Branch prefix tags (e.g. `hotfix`, `feature`, `chore`) parsed from the branch name
+- PR number and cleaned branch name
+- A **DRAFT** badge when the PR is a draft
 
 ### Notifications
 
