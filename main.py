@@ -1043,6 +1043,140 @@ class StartupManager:
 
 
 # ---------------------------------------------------------------------------
+# Update checker
+# ---------------------------------------------------------------------------
+class UpdateChecker:
+    REPO_URL = "https://github.com/summitnl/ActionsMonitor"
+
+    @staticmethod
+    def check() -> Optional[str]:
+        """Returns the new commit short-hash if an update is available, None otherwise."""
+        try:
+            app_dir = Path(__file__).parent
+            subprocess.run(
+                ["git", "fetch", "origin", "main", "--quiet"],
+                cwd=app_dir, timeout=15, capture_output=True,
+            )
+            local = subprocess.run(
+                ["git", "rev-parse", "HEAD"],
+                cwd=app_dir, capture_output=True, text=True,
+            ).stdout.strip()
+            remote = subprocess.run(
+                ["git", "rev-parse", "origin/main"],
+                cwd=app_dir, capture_output=True, text=True,
+            ).stdout.strip()
+            if local and remote and local != remote:
+                return remote[:7]
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def apply_update() -> tuple[bool, str]:
+        """Pull latest and install deps. Returns (success, message)."""
+        app_dir = Path(__file__).parent
+        try:
+            result = subprocess.run(
+                ["git", "pull", "origin", "main"],
+                cwd=app_dir, capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                return False, result.stderr.strip() or "git pull failed"
+            subprocess.run(
+                [sys.executable, "-m", "pip", "install", "-r",
+                 str(app_dir / "requirements.txt"), "--quiet"],
+                cwd=app_dir, capture_output=True, timeout=60,
+            )
+            return True, "Update complete"
+        except Exception as exc:
+            return False, str(exc)
+
+    @staticmethod
+    def restart_app():
+        """Re-launch the app and exit the current process."""
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
+def _show_update_dialog(root: tk.Tk, commit_hash: str):
+    """Show a modal dark-themed update dialog."""
+    dlg = tk.Toplevel(root)
+    dlg.title(f"{APP_NAME} — Update Available")
+    dlg.configure(bg=BG_DARK)
+    dlg.resizable(False, False)
+
+    pad = {"padx": 20, "pady": 6}
+
+    tk.Label(
+        dlg, text="A new version of Actions Monitor is available.",
+        font=("Segoe UI", 11, "bold"), bg=BG_DARK, fg=FG_TEXT,
+    ).pack(**pad, pady=(16, 6))
+
+    tk.Label(
+        dlg, text=f"Latest commit: {commit_hash}",
+        font=("Segoe UI", 9), bg=BG_DARK, fg=FG_MUTED,
+    ).pack(**pad, pady=(0, 4))
+
+    link = tk.Label(
+        dlg, text="View README on GitHub",
+        font=("Segoe UI", 9, "underline"), bg=BG_DARK, fg=FG_LINK,
+        cursor="hand2",
+    )
+    link.pack(**pad, pady=(0, 10))
+    link.bind("<Button-1>", lambda _: webbrowser.open(f"{UpdateChecker.REPO_URL}#readme"))
+
+    status_lbl = tk.Label(dlg, text="", font=("Segoe UI", 9), bg=BG_DARK, fg=FG_MUTED)
+    status_lbl.pack(**pad, pady=(0, 4))
+
+    btn_frame = tk.Frame(dlg, bg=BG_DARK)
+    btn_frame.pack(**pad, pady=(0, 16))
+
+    def do_update():
+        update_btn.config(state=tk.DISABLED)
+        skip_btn.config(state=tk.DISABLED)
+        status_lbl.config(text="Updating...", fg=FG_TEXT)
+        dlg.update()
+
+        def _run():
+            ok, msg = UpdateChecker.apply_update()
+            dlg.after(0, lambda: _on_result(ok, msg))
+
+        def _on_result(ok, msg):
+            if ok:
+                status_lbl.config(text="Update complete — restarting...", fg=COLOUR[ST_SUCCESS])
+                dlg.update()
+                dlg.after(500, UpdateChecker.restart_app)
+            else:
+                status_lbl.config(text=f"Update failed: {msg}", fg=COLOUR[ST_FAILURE])
+                skip_btn.config(state=tk.NORMAL)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    update_btn = tk.Button(
+        btn_frame, text="Update", font=("Segoe UI", 10),
+        bg=ACCENT, fg=FG_TEXT, activebackground=BG_ROW, activeforeground=FG_TEXT,
+        relief=tk.FLAT, padx=16, pady=4, cursor="hand2", command=do_update,
+    )
+    update_btn.pack(side=tk.LEFT, padx=(0, 8))
+
+    skip_btn = tk.Button(
+        btn_frame, text="Skip", font=("Segoe UI", 10),
+        bg=ACCENT, fg=FG_MUTED, activebackground=BG_ROW, activeforeground=FG_TEXT,
+        relief=tk.FLAT, padx=16, pady=4, cursor="hand2", command=dlg.destroy,
+    )
+    skip_btn.pack(side=tk.LEFT)
+
+    # Center on screen
+    dlg.update_idletasks()
+    w, h = dlg.winfo_width(), dlg.winfo_height()
+    x = (dlg.winfo_screenwidth() - w) // 2
+    y = (dlg.winfo_screenheight() - h) // 2
+    dlg.geometry(f"+{x}+{y}")
+
+    dlg.grab_set()
+    root.wait_window(dlg)
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow:
@@ -1334,6 +1468,15 @@ class MainWindow:
 # ---------------------------------------------------------------------------
 def main():
     config_mgr  = ConfigManager()
+
+    # Check for updates before starting the main UI
+    new_version = UpdateChecker.check()
+    if new_version:
+        root = tk.Tk()
+        root.withdraw()
+        _show_update_dialog(root, new_version)
+        root.destroy()
+
     event_queue: queue.Queue = queue.Queue()
 
     win  = MainWindow(config_mgr, event_queue)

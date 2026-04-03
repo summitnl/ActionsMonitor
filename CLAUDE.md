@@ -69,6 +69,10 @@ PRWorkflowPoller._poll()      # pr mode
 
 `MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows and the head branch name for PR-mode rows. This allows multiple dynamic rows per poller.
 
+### README changelog
+
+When adding features, always add a dated changelog entry to the `## Changelog` section at the bottom of `README.md`. Do not modify existing entries — only append new ones at the top of the list.
+
 ### Config files
 
 - `config.template.yaml` — checked into the repo; edit this when adding/documenting new settings or examples.
@@ -93,6 +97,10 @@ PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
 `ST_*` string constants (`"unknown"`, `"in_progress"`, `"success"`, etc.) are used as dict keys throughout — in `COLOUR`, `STATUS_LABEL`, `STATUS_SYMBOL`, and `_icons`. Adding a new status requires updating all four.
 
 The `CONCLUSION_MAP` translates GitHub's `conclusion` field values into internal `ST_*` constants. `None` conclusion (run still active) maps to `ST_RUNNING`.
+
+### Auto-update check
+
+On startup (before the main window), `UpdateChecker.check()` runs `git fetch origin main` and compares local HEAD against `origin/main`. If behind, a modal dialog offers to pull + restart. All git/network errors are silently ignored so the app always starts.
 
 ### Tray icon colour precedence
 

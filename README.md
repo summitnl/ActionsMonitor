@@ -134,7 +134,19 @@ Removes the startup registry entry and uninstalls the Python packages. Delete th
 
 ## Updating
 
+The app checks for updates automatically on startup. If a new version is available, a dialog offers to pull and restart for you.
+
+To update manually:
+
 ```bash
 git pull
 pip install -r requirements.txt
 ```
+
+## Changelog
+
+### 2026-04-03
+
+- **PR mode** — monitor your own pull request builds with `mode: "pr"`. One row per active PR, with branch prefix tags (`hotfix`, `feature`, etc.), PR numbers, and a DRAFT indicator. Stale rows auto-remove after a configurable timeout.
+- **PR notification overrides** — new `notifications.pr` config subsection lets you override notification defaults for PR-mode workflows (e.g. disable success notifications for PRs only).
+- **Auto-update check** — the app checks for updates on startup via git and offers to pull + restart automatically.
