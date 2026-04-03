@@ -33,7 +33,6 @@ github_token: ""
 # These apply to all workflows unless overridden per-workflow below.
 # =============================================================================
 notifications:
-
   # Notify when a new workflow run starts
   new_run:
     enabled: true
@@ -65,12 +64,12 @@ notifications:
 # The app will extract the branch automatically from the URL.
 # =============================================================================
 workflows:
-
   # ---------------------------------------------------------------------------
-  # Example workflow entry (remove the leading '#' characters to activate):
+  # Example: Branch mode (default) — one row per workflow+branch combo
   # ---------------------------------------------------------------------------
   # - url: https://github.com/owner/repository/actions/workflows/ci.yml
   #   name: "CI Pipeline"         # Optional: display name (defaults to filename)
+  #   mode: "branch"              # Optional: "branch" (default) or "pr"
   #   polling_rate: 60            # Optional: polling interval in seconds (default: 60)
   #   branch: main                # Optional: only monitor runs on this branch
   #   notifications:              # Optional: override global settings for this workflow
@@ -81,4 +80,27 @@ workflows:
   #       sound: default
   #     success:
   #       enabled: false
+  #
+  # Example with a real URL (branch mode, acceptance branch):
+  # - url: https://github.com/summitnl/HippoCampus/actions/workflows/acceptance-merge.yml?query=branch%3Aacceptance
+  #   name: "Acceptance Merge"
+  #   polling_rate: 30
+
+  # ---------------------------------------------------------------------------
+  # Example: PR mode — one row per active PR you authored
+  # ---------------------------------------------------------------------------
+  # - url: https://github.com/owner/repository/actions/workflows/ci.yml
+  #   name: "CI — My PRs"
+  #   mode: "pr"                  # Shows one row per PR branch you authored
+  #   polling_rate: 45
+  #   max_prs: 5                  # Max PR rows to show (default: 5)
+  #   pr_stale_after: 300         # Seconds before removing a stale PR row (default: 300)
+  #
+  # Example with a real URL (PR mode):
+  # - url: https://github.com/summitnl/HippoCampus/actions/workflows/acceptance-pr.yml
+  #   name: "Acceptance/PR"
+  #   mode: "pr"
+  #   polling_rate: 45
+  #   max_prs: 5
+  #   pr_stale_after: 300
   # ---------------------------------------------------------------------------

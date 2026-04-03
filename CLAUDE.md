@@ -35,26 +35,52 @@ The UI drains the queue via `root.after(500, _drain_queue)` — this is the only
 ### Data flow
 
 ```
-WorkflowPoller._poll()
+WorkflowPoller._poll()        # branch mode (default)
   → fetch_latest_run()          # GitHub REST API
   → StatusEvent → queue.Queue
   → MainWindow._drain_queue()   # main thread
   → WorkflowRow.update()        # widget refresh
   → TrayManager.update()        # tray icon colour
+
+PRWorkflowPoller._poll()      # pr mode
+  → fetch_github_username()     # cached GET /user
+  → fetch_pr_runs()             # runs filtered by actor+event
+  → group by head_branch        # one StatusEvent per branch
+  → StatusEvent(sub_key=branch) → queue.Queue
+  → MainWindow creates/updates/removes WorkflowRows dynamically
 ```
+
+### Workflow modes
+
+- **Branch mode** (`mode: "branch"`, default) — one fixed row per workflow+branch combo. Uses `WorkflowPoller`.
+- **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` seconds.
 
 ### Key classes
 
 - **`ConfigManager`** — loads `config.yaml` with `_deep_merge` against `DEFAULT_CONFIG`; thread-safe via a lock. `get()` always returns a snapshot.
-- **`WorkflowPoller`** — one per configured workflow; tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`).
-- **`WorkflowRow`** — pure tkinter widget wrapper; receives updates only from the main thread via `update(state, poll_rate)`.
+- **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`).
+- **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch`, tracks per-branch state, emits removal events for stale branches. Fetches and caches PR draft status.
+- **`WorkflowRow`** — pure tkinter widget wrapper; receives updates only from the main thread via `update(state, poll_rate)`. PR rows display additional labels: branch prefix badge, PR number + branch name, DRAFT indicator.
 - **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
 - **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers.
 
+### Composite keys
+
+`MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows and the head branch name for PR-mode rows. This allows multiple dynamic rows per poller.
+
+### Config files
+
+- `config.template.yaml` — checked into the repo; edit this when adding/documenting new settings or examples.
+- `config.yaml` — the user's personal config (gitignored, contains token and real workflow entries). **Never edit `config.yaml` directly.** Make changes to the template and ask the user to update their own config manually.
+
 ### Config resolution
 
 Per-workflow `notifications` sections are deep-merged *over* the global `notifications` block at notification fire time (not at load time). The merge happens in `WorkflowPoller._fire_notification`.
+
+### GitHub username caching
+
+`fetch_github_username()` calls `GET /user` once and caches the result in a module-level variable behind a lock. The cache is reset on config reload (in case the token changes).
 
 ### Status constants
 

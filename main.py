@@ -82,8 +82,7 @@ if IS_WINDOWS:
 # ---------------------------------------------------------------------------
 APP_NAME    = "Actions Monitor"
 APP_VERSION = "1.0"
-CONFIG_FILE    = Path(__file__).parent / "config.yaml"
-CONFIG_TEMPLATE = Path(__file__).parent / "config.template.yaml"
+CONFIG_FILE = Path(__file__).parent / "config.yaml"
 
 POLL_DEFAULT = 60  # seconds
 
@@ -173,12 +172,8 @@ class ConfigManager:
             return self.data
 
     def _write_default(self):
-        if CONFIG_TEMPLATE.exists():
-            import shutil
-            shutil.copy(CONFIG_TEMPLATE, CONFIG_FILE)
-        else:
-            with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
-                yaml.dump(DEFAULT_CONFIG, fh, default_flow_style=False)
+        with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
+            yaml.dump(DEFAULT_CONFIG, fh, default_flow_style=False)
 
     @staticmethod
     def open_in_editor():
@@ -267,6 +262,73 @@ def fetch_latest_run(
 
 
 # ---------------------------------------------------------------------------
+# GitHub username (cached)
+# ---------------------------------------------------------------------------
+_cached_github_username: Optional[str] = None
+_github_username_lock = threading.Lock()
+
+
+def fetch_github_username(token: str) -> Optional[str]:
+    """Fetch the authenticated user's login via GET /user. Cached after first call."""
+    global _cached_github_username
+    if not token:
+        return None
+    with _github_username_lock:
+        if _cached_github_username is not None:
+            return _cached_github_username
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    resp = requests.get("https://api.github.com/user", headers=headers, timeout=15)
+    resp.raise_for_status()
+    login = resp.json().get("login")
+    with _github_username_lock:
+        _cached_github_username = login
+    return login
+
+
+def fetch_pr_runs(
+    owner: str,
+    repo: str,
+    workflow_file: str,
+    actor: str,
+    token: str,
+    per_page: int = 10,
+) -> list[dict]:
+    """Fetch recent workflow runs filtered by actor and pull_request event."""
+    api_url = (
+        f"https://api.github.com/repos/{owner}/{repo}"
+        f"/actions/workflows/{workflow_file}/runs"
+    )
+    params = {"actor": actor, "event": "pull_request", "per_page": per_page}
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = requests.get(api_url, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("workflow_runs", [])
+
+
+# Known branch prefixes for display tagging
+_KNOWN_PREFIXES = {"hotfix", "chore", "feature", "bugfix", "release", "fix", "docs"}
+
+
+def parse_branch_prefix(branch: str) -> tuple[Optional[str], str]:
+    """Parse a branch name like 'hotfix/fix-login' into ('hotfix', 'fix-login').
+    Returns (None, original) if no known prefix."""
+    if "/" in branch:
+        prefix, rest = branch.split("/", 1)
+        if prefix.lower() in _KNOWN_PREFIXES:
+            return prefix.lower(), rest
+    return None, branch
+
+
+# ---------------------------------------------------------------------------
 # Workflow state
 # ---------------------------------------------------------------------------
 @dataclass
@@ -282,6 +344,12 @@ class WorkflowState:
     conclusion:  Optional[str] = None
     last_check:  Optional[datetime] = None
     error:       Optional[str] = None
+    # PR mode fields
+    head_branch:   Optional[str] = None
+    branch_prefix: Optional[str] = None
+    branch_short:  Optional[str] = None
+    pr_number:     Optional[int] = None
+    is_draft:      bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -292,6 +360,8 @@ class StatusEvent:
     workflow_id: int
     new_state:   WorkflowState
     notif_type:  Optional[str] = None   # "new_run" | "success" | "failure" | None
+    sub_key:     Optional[str] = None   # head branch for PR rows, None for regular rows
+    removed:     bool = False           # signals the UI to remove a stale row
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +591,185 @@ class WorkflowPoller(threading.Thread):
 
 
 # ---------------------------------------------------------------------------
+# PR-mode poller
+# ---------------------------------------------------------------------------
+class PRWorkflowPoller(WorkflowPoller):
+    """Poller that shows one row per active PR branch instead of one fixed row."""
+
+    def __init__(self, wid, cfg_entry, config_mgr, event_queue):
+        super().__init__(wid, cfg_entry, config_mgr, event_queue)
+        self._max_prs = int(cfg_entry.get("max_prs", 5))
+        self._stale_after = int(cfg_entry.get("pr_stale_after", 300))
+        # Per-branch tracking
+        self._prev_run_ids:    dict[str, int] = {}
+        self._prev_statuses:   dict[str, str] = {}
+        self._prev_conclusions: dict[str, Optional[str]] = {}
+        self._last_seen:       dict[str, datetime] = {}
+        # PR detail cache: pr_number → {draft: bool}
+        self._pr_cache: dict[int, dict] = {}
+
+    def _poll(self):
+        cfg   = self.config_mgr.get()
+        token = cfg.get("github_token", "")
+        notif_cfg = cfg.get("notifications", {})
+
+        # Resolve username
+        try:
+            username = fetch_github_username(token)
+        except Exception as exc:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+            state.status = ST_UNKNOWN
+            state.error = f"Cannot resolve GitHub user: {exc}"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+        if not username:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+            state.status = ST_UNKNOWN
+            state.error = "No token configured (PR mode requires a token)"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+
+        if not self.owner:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+            state.status = ST_UNKNOWN
+            state.error = "Invalid workflow URL in config"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+
+        try:
+            runs = fetch_pr_runs(
+                self.owner, self.repo, self.wf_file, username, token,
+                per_page=self._max_prs * 2,
+            )
+        except requests.HTTPError as exc:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+            state.status = ST_UNKNOWN
+            state.error = f"HTTP {exc.response.status_code}"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+        except Exception as exc:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+            state.status = ST_UNKNOWN
+            state.error = str(exc)
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+
+        # Group by head_branch, take latest per branch
+        by_branch: dict[str, dict] = {}
+        for run in runs:
+            hb = run.get("head_branch", "")
+            if hb and hb not in by_branch:
+                by_branch[hb] = run
+
+        # Limit to max_prs
+        active_branches = dict(list(by_branch.items())[:self._max_prs])
+        now = datetime.now()
+
+        for branch_name, run in active_branches.items():
+            self._last_seen[branch_name] = now
+
+            run_id     = run.get("id")
+            api_status = run.get("status")
+            conclusion = run.get("conclusion")
+
+            state = WorkflowState(
+                name=self.name_display,
+                url=self.cfg_entry.get("url", ""),
+                branch=branch_name,
+                head_branch=branch_name,
+            )
+            state.last_check = now
+
+            if api_status == "completed":
+                state.status = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
+            elif api_status == "in_progress":
+                state.status = ST_RUNNING
+            elif api_status == "queued":
+                state.status = ST_QUEUED
+            else:
+                state.status = ST_UNKNOWN
+
+            state.run_id     = run_id
+            state.run_url    = run.get("html_url")
+            state.run_number = run.get("run_number")
+            state.started_at = run.get("run_started_at") or run.get("created_at")
+            state.conclusion = conclusion
+
+            # Parse branch prefix
+            prefix, short = parse_branch_prefix(branch_name)
+            state.branch_prefix = prefix
+            state.branch_short  = short
+
+            # Extract PR number and draft status
+            prs = run.get("pull_requests") or []
+            if prs:
+                pr_num = prs[0].get("number")
+                state.pr_number = pr_num
+                if pr_num and pr_num not in self._pr_cache:
+                    state.is_draft = self._fetch_pr_draft(pr_num, token)
+                elif pr_num:
+                    state.is_draft = self._pr_cache[pr_num].get("draft", False)
+
+            # Determine notification
+            notif_type: Optional[str] = None
+            prev_rid = self._prev_run_ids.get(branch_name)
+            prev_st  = self._prev_statuses.get(branch_name)
+            if prev_rid is not None and run_id != prev_rid:
+                notif_type = "new_run"
+            elif (
+                run_id == prev_rid
+                and api_status == "completed"
+                and prev_st != "completed"
+            ):
+                if state.status == ST_SUCCESS:
+                    notif_type = "success"
+                elif state.status == ST_FAILURE:
+                    notif_type = "failure"
+
+            self._prev_run_ids[branch_name]     = run_id
+            self._prev_statuses[branch_name]    = api_status
+            self._prev_conclusions[branch_name] = conclusion
+
+            self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=branch_name))
+
+            if notif_type:
+                self._fire_notification(notif_type, state, notif_cfg)
+
+        # Detect stale branches
+        for branch_name in list(self._last_seen.keys()):
+            if branch_name in active_branches:
+                continue
+            elapsed = (now - self._last_seen[branch_name]).total_seconds()
+            if elapsed >= self._stale_after:
+                # Emit removal event
+                dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=branch_name)
+                self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=branch_name, removed=True))
+                del self._last_seen[branch_name]
+                self._prev_run_ids.pop(branch_name, None)
+                self._prev_statuses.pop(branch_name, None)
+                self._prev_conclusions.pop(branch_name, None)
+
+    def _fetch_pr_draft(self, pr_number: int, token: str) -> bool:
+        """Fetch draft status for a PR. Caches the result."""
+        try:
+            url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            data = resp.json()
+            is_draft = data.get("draft", False)
+            self._pr_cache[pr_number] = {"draft": is_draft}
+            return is_draft
+        except Exception:
+            return False
+
+
+# ---------------------------------------------------------------------------
 # Icon creation helpers
 # ---------------------------------------------------------------------------
 def _make_icon_image(colour: str, size: int = 64) -> Image.Image:
@@ -620,12 +869,41 @@ class WorkflowRow:
         centre = tk.Frame(self.frame, bg=bg)
         centre.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=4)
 
+        # Top row: name + optional PR details (prefix, branch, draft)
+        top_row = tk.Frame(centre, bg=bg)
+        top_row.pack(fill=tk.X)
+
         self._name_lbl = tk.Label(
-            centre, text=state.name, font=("Segoe UI", 10, "bold"),
+            top_row, text=state.name, font=("Segoe UI", 10, "bold"),
             bg=bg, fg=FG_LINK, cursor="hand2", anchor="w",
         )
-        self._name_lbl.pack(fill=tk.X)
+        self._name_lbl.pack(side=tk.LEFT)
         self._name_lbl.bind("<Button-1>", self._open_url)
+
+        # Separator " / " between workflow name and PR info (hidden for non-PR)
+        self._sep_lbl = tk.Label(
+            top_row, text=" / ", font=("Segoe UI", 10),
+            bg=bg, fg=FG_MUTED, anchor="w",
+        )
+
+        # Branch prefix badge (e.g. "hotfix")
+        self._prefix_lbl = tk.Label(
+            top_row, text="", font=("Segoe UI", 8),
+            bg="#3A3A50", fg="#B4BEFE", anchor="w", padx=4, pady=0,
+        )
+
+        # PR number + branch short name
+        self._branch_lbl = tk.Label(
+            top_row, text="", font=("Segoe UI", 9),
+            bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
+        )
+        self._branch_lbl.bind("<Button-1>", self._open_url)
+
+        # DRAFT badge
+        self._draft_lbl = tk.Label(
+            top_row, text="DRAFT", font=("Segoe UI", 8, "bold"),
+            bg="#4A3820", fg="#F5A623", anchor="w", padx=4, pady=0,
+        )
 
         self._info_lbl = tk.Label(
             centre, text="", font=("Segoe UI", 8),
@@ -634,7 +912,6 @@ class WorkflowRow:
         self._info_lbl.pack(fill=tk.X)
 
         # Right column — polling rate
-        poll_rate = 60  # placeholder; updated when we have the config entry
         self._poll_lbl = tk.Label(
             self.frame, text="", font=("Segoe UI", 8),
             bg=bg, fg=FG_MUTED, width=12, anchor="e",
@@ -674,6 +951,31 @@ class WorkflowRow:
             self._dot.config(
                 text=STATUS_SYMBOL.get(s.status, "●"),
             )
+
+        # PR-mode labels
+        if s.head_branch:
+            self._sep_lbl.pack(side=tk.LEFT)
+            if s.branch_prefix:
+                self._prefix_lbl.config(text=s.branch_prefix)
+                self._prefix_lbl.pack(side=tk.LEFT, padx=(2, 4))
+            else:
+                self._prefix_lbl.pack_forget()
+
+            branch_text = s.branch_short or s.head_branch
+            if s.pr_number:
+                branch_text = f"#{s.pr_number}  {branch_text}"
+            self._branch_lbl.config(text=branch_text)
+            self._branch_lbl.pack(side=tk.LEFT, padx=(0, 4))
+
+            if s.is_draft:
+                self._draft_lbl.pack(side=tk.LEFT, padx=(2, 0))
+            else:
+                self._draft_lbl.pack_forget()
+        else:
+            self._sep_lbl.pack_forget()
+            self._prefix_lbl.pack_forget()
+            self._branch_lbl.pack_forget()
+            self._draft_lbl.pack_forget()
 
 
 # ---------------------------------------------------------------------------
@@ -747,8 +1049,8 @@ class MainWindow:
         self._config_mgr  = config_mgr
         self._event_queue = event_queue
         self._pollers: dict[int, WorkflowPoller] = {}
-        self._states:  dict[int, WorkflowState]  = {}
-        self._rows:    dict[int, WorkflowRow]     = {}
+        self._states:  dict[tuple[int, Optional[str]], WorkflowState]  = {}
+        self._rows:    dict[tuple[int, Optional[str]], WorkflowRow]     = {}
         self._tray: Optional[TrayManager] = None
 
         self._root = tk.Tk()
@@ -880,24 +1182,32 @@ class MainWindow:
     def _add_poller(self, wid: int, entry: dict):
         if wid in self._pollers:
             return
+        mode = entry.get("mode", "branch")
         url = entry.get("url", "")
         try:
             _, _, wf_file, url_branch = parse_workflow_url(url)
         except ValueError:
             wf_file = url
             url_branch = None
-        branch   = entry.get("branch") or url_branch
-        name     = entry.get("name") or wf_file or url
-        state    = WorkflowState(name=name, url=url, branch=branch)
-        self._states[wid] = state
 
-        alt = len(self._rows) % 2 == 1
-        row = WorkflowRow(self._list_frame, wid, state, alt)
-        poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
-        row.update(state, poll_rate)
-        self._rows[wid] = row
+        if mode == "pr":
+            # PR mode: rows are created dynamically, no initial row
+            poller = PRWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
+        else:
+            branch   = entry.get("branch") or url_branch
+            name     = entry.get("name") or wf_file or url
+            state    = WorkflowState(name=name, url=url, branch=branch)
+            key = (wid, None)
+            self._states[key] = state
 
-        poller = WorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
+            alt = len(self._rows) % 2 == 1
+            row = WorkflowRow(self._list_frame, wid, state, alt)
+            poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
+            row.update(state, poll_rate)
+            self._rows[key] = row
+
+            poller = WorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
+
         self._pollers[wid] = poller
         poller.start()
 
@@ -920,18 +1230,45 @@ class MainWindow:
             self._root.after(500, self._drain_queue)
 
     def _apply_event(self, event: StatusEvent):
-        self._states[event.workflow_id] = event.new_state
+        key = (event.workflow_id, event.sub_key)
         cfg      = self._config_mgr.get()
         workflows = cfg.get("workflows") or []
         entry    = workflows[event.workflow_id] if event.workflow_id < len(workflows) else {}
         poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
 
-        row = self._rows.get(event.workflow_id)
-        if row:
-            row.update(event.new_state, poll_rate)
+        if event.removed:
+            # Remove a stale PR row
+            row = self._rows.pop(key, None)
+            if row:
+                row.frame.destroy()
+            self._states.pop(key, None)
+            self._restripe_rows()
+        else:
+            self._states[key] = event.new_state
+            row = self._rows.get(key)
+            if row:
+                row.update(event.new_state, poll_rate)
+            elif event.sub_key is not None:
+                # Dynamically create a new PR row
+                alt = len(self._rows) % 2 == 1
+                new_row = WorkflowRow(self._list_frame, event.workflow_id, event.new_state, alt)
+                new_row.update(event.new_state, poll_rate)
+                self._rows[key] = new_row
 
         if self._tray:
             self._tray.update(list(self._states.values()))
+
+    def _restripe_rows(self):
+        """Recalculate alternating row backgrounds after a row is removed."""
+        for i, row in enumerate(self._rows.values()):
+            bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
+            row._bg = bg
+            row.frame.config(bg=bg)
+            for widget in row.frame.winfo_children():
+                try:
+                    widget.config(bg=bg)
+                except tk.TclError:
+                    pass
 
     # ------------------------------------------------------------------
     # Config hot-reload
@@ -943,11 +1280,15 @@ class MainWindow:
         self._root.after(2000, self._watch_config)
 
     def _reload_pollers(self):
+        global _cached_github_username
         self._stop_all_pollers()
         for row in self._rows.values():
             row.frame.destroy()
         self._rows.clear()
         self._states.clear()
+        # Reset cached username so a token change takes effect
+        with _github_username_lock:
+            _cached_github_username = None
         self._start_pollers()
 
     # ------------------------------------------------------------------
