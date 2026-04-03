@@ -33,6 +33,10 @@ github_token: ""
 # These apply to all workflows unless overridden per-workflow below.
 # =============================================================================
 notifications:
+  # Seconds to wait before sending notifications, allowing multiple to be
+  # combined into one toast + sound. Set to 0 to disable (immediate, old behavior).
+  batch_window: 3
+
   # Notify when a new workflow run starts
   new_run:
     enabled: true

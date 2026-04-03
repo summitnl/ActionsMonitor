@@ -132,6 +132,7 @@ ACCENT     = "#313244"
 DEFAULT_CONFIG: dict = {
     "github_token": "",
     "notifications": {
+        "batch_window": 3,
         "new_run":  {"enabled": True,  "sound": "default"},
         "failure":  {"enabled": True,  "sound": "default"},
         "success":  {"enabled": True,  "sound": "none"},
@@ -367,14 +368,102 @@ class StatusEvent:
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
+_NOTIF_TYPE_PRIORITY: dict[str, int] = {"success": 1, "new_run": 2, "failure": 3}
+
+@dataclass
+class _PendingNotification:
+    notif_type: str        # "new_run" | "success" | "failure"
+    title:      str
+    message:    str
+    sound_cfg:  str
+    url:        Optional[str]
+
+
 class NotificationManager:
-    def notify(self, title: str, message: str, sound_cfg: str, url: Optional[str] = None):
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._pending: list[_PendingNotification] = []
+        self._flush_timer: Optional[threading.Timer] = None
+        self._batch_window: float = 3.0
+
+    def set_batch_window(self, seconds: float):
+        with self._lock:
+            self._batch_window = max(seconds, 0.0)
+
+    def notify(self, title: str, message: str, sound_cfg: str,
+               url: Optional[str] = None, notif_type: str = "new_run"):
+        with self._lock:
+            if self._batch_window <= 0:
+                # Batching disabled — fire immediately (old behaviour)
+                threading.Thread(
+                    target=self._send,
+                    args=(title, message, sound_cfg, url),
+                    daemon=True,
+                ).start()
+                return
+            self._pending.append(_PendingNotification(notif_type, title, message, sound_cfg, url))
+            if self._flush_timer is None:
+                self._flush_timer = threading.Timer(self._batch_window, self._flush)
+                self._flush_timer.daemon = True
+                self._flush_timer.start()
+
+    # -- flush batched notifications -----------------------------------------
+    def _flush(self):
+        with self._lock:
+            batch = list(self._pending)
+            self._pending.clear()
+            self._flush_timer = None
+
+        if not batch:
+            return
+
+        if len(batch) == 1:
+            item = batch[0]
+            threading.Thread(
+                target=self._send,
+                args=(item.title, item.message, item.sound_cfg, item.url),
+                daemon=True,
+            ).start()
+            return
+
+        # Multiple notifications — combine into one
+        counts: dict[str, int] = {}
+        for item in batch:
+            counts[item.notif_type] = counts.get(item.notif_type, 0) + 1
+
+        type_labels = {
+            "failure": "\u2717 {n} failed",
+            "new_run": "\u25b6 {n} started",
+            "success": "\u2713 {n} succeeded",
+        }
+        parts = []
+        for ntype in ("failure", "new_run", "success"):
+            if ntype in counts:
+                parts.append(type_labels[ntype].format(n=counts[ntype]))
+
+        title = f"{sum(counts.values())} workflow notifications"
+        body = "  \u2022  ".join(parts)
+
+        # Pick sound from highest-priority notification type
+        best = max(batch, key=lambda i: _NOTIF_TYPE_PRIORITY.get(i.notif_type, 0))
+        sound = best.sound_cfg
+
+        # URL: use the first failure's URL, or first item's
+        url = None
+        for item in batch:
+            if item.notif_type == "failure" and item.url:
+                url = item.url
+                break
+        if url is None:
+            url = batch[0].url
+
         threading.Thread(
             target=self._send,
-            args=(title, message, sound_cfg, url),
+            args=(title, body, sound, url),
             daemon=True,
         ).start()
 
+    # -- low-level send / sound ----------------------------------------------
     def _send(self, title: str, message: str, sound_cfg: str, url: Optional[str] = None):
         if IS_WINDOWS and WINOTIFY_AVAILABLE:
             try:
@@ -588,7 +677,7 @@ class WorkflowPoller(threading.Thread):
             "failure": f"{state.name}  •  Run #{state.run_number}",
         }
         url = state.run_url or state.url
-        NOTIF.notify(titles[notif_type], messages[notif_type], sound, url=url)
+        NOTIF.notify(titles[notif_type], messages[notif_type], sound, url=url, notif_type=notif_type)
 
 
 # ---------------------------------------------------------------------------
@@ -1310,6 +1399,8 @@ class MainWindow:
     # ------------------------------------------------------------------
     def _start_pollers(self):
         cfg      = self._config_mgr.get()
+        notif_cfg = cfg.get("notifications", {})
+        NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 3)))
         workflows = cfg.get("workflows") or []
         for wid, entry in enumerate(workflows):
             self._add_poller(wid, entry)
@@ -1413,6 +1504,7 @@ class MainWindow:
         if changed:
             self._reload_pollers()
         self._root.after(2000, self._watch_config)
+
 
     def _reload_pollers(self):
         global _cached_github_username
