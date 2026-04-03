@@ -78,6 +78,12 @@ PRWorkflowPoller._poll()      # pr mode
 
 Per-workflow `notifications` sections are deep-merged *over* the global `notifications` block at notification fire time (not at load time). The merge happens in `WorkflowPoller._fire_notification`.
 
+For PR-mode workflows, an optional `notifications.pr` subsection is merged between global and per-workflow:
+```
+branch-mode: global[type] → per-workflow[type] → final
+PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
+```
+
 ### GitHub username caching
 
 `fetch_github_username()` calls `GET /user` once and caches the result in a module-level variable behind a lock. The cache is reset on config reload (in case the token changes).

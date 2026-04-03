@@ -52,6 +52,17 @@ notifications:
     enabled: true
     sound: none
 
+  # ---------------------------------------------------------------------------
+  # PR-mode notification overrides (optional)
+  # These override the global defaults above, but only for PR-mode workflows.
+  # Per-workflow overrides still take priority over these.
+  # ---------------------------------------------------------------------------
+  # pr:
+  #   new_run:
+  #     sound: none
+  #   success:
+  #     enabled: false
+
 # =============================================================================
 # Workflows to Monitor
 # =============================================================================

@@ -565,13 +565,14 @@ class WorkflowPoller(threading.Thread):
         if notif_type:
             self._fire_notification(notif_type, state, notif_cfg)
 
-    def _fire_notification(self, notif_type: str, state: WorkflowState, global_notif: dict):
-        # Per-workflow override or fall back to global
-        wf_notif   = self.cfg_entry.get("notifications", {})
-        section    = _deep_merge(
-            global_notif.get(notif_type, {}),
-            wf_notif.get(notif_type, {}),
-        )
+    def _fire_notification(self, notif_type: str, state: WorkflowState, global_notif: dict, is_pr: bool = False):
+        # Merge chain: global → (pr override) → per-workflow
+        base = global_notif.get(notif_type, {})
+        if is_pr:
+            pr_notif = global_notif.get("pr", {})
+            base = _deep_merge(base, pr_notif.get(notif_type, {}))
+        wf_notif = self.cfg_entry.get("notifications", {})
+        section = _deep_merge(base, wf_notif.get(notif_type, {}))
         if not section.get("enabled", True):
             return
         sound = section.get("sound", "default")
@@ -733,7 +734,7 @@ class PRWorkflowPoller(WorkflowPoller):
             self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=branch_name))
 
             if notif_type:
-                self._fire_notification(notif_type, state, notif_cfg)
+                self._fire_notification(notif_type, state, notif_cfg, is_pr=True)
 
         # Detect stale branches
         for branch_name in list(self._last_seen.keys()):
