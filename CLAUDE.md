@@ -48,18 +48,27 @@ PRWorkflowPoller._poll()      # pr mode
   → group by head_branch        # one StatusEvent per branch
   → StatusEvent(sub_key=branch) → queue.Queue
   → MainWindow creates/updates/removes WorkflowRows dynamically
+
+ActorWorkflowPoller._poll()   # actor mode
+  → fetch_github_username()     # cached GET /user
+  → fetch_actor_runs()          # repo-level /actions/runs?actor=...
+  → group by workflow_name+branch  # one StatusEvent per combo
+  → StatusEvent(sub_key=composite) → queue.Queue
+  → MainWindow creates/updates/removes WorkflowRows dynamically
 ```
 
 ### Workflow modes
 
 - **Branch mode** (`mode: "branch"`, default) — one fixed row per workflow+branch combo. Uses `WorkflowPoller`.
 - **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` seconds.
+- **Actor mode** (`mode: "actor"`) — one row per recent workflow run by the authenticated user across all workflows in a repo. Uses `ActorWorkflowPoller`. Supports `filter: "failed"` to show only failed runs. Rows are created dynamically and auto-removed after `stale_after` seconds.
 
 ### Key classes
 
 - **`ConfigManager`** — loads `config.yaml` with `_deep_merge` against `DEFAULT_CONFIG`; thread-safe via a lock. `get()` always returns a snapshot.
 - **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`).
 - **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch`, tracks per-branch state, emits removal events for stale branches. Fetches and caches PR draft status.
+- **`ActorWorkflowPoller`** — subclass of `WorkflowPoller` (actor mode); fetches runs via repo-level `/actions/runs?actor=...`, groups by `workflow_name:head_branch`, supports client-side `filter: "failed"`. Uses `parse_actor_url()` for the different URL format.
 - **`WorkflowRow`** — pure tkinter widget wrapper; receives updates only from the main thread via `update(state, poll_rate)`. PR rows display additional labels: branch prefix badge, PR number + branch name, DRAFT indicator.
 - **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.

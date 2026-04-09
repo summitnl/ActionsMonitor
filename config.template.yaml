@@ -122,4 +122,23 @@ workflows:
   #   polling_rate: 45
   #   max_prs: 5
   #   pr_stale_after: 300
+
+  # ---------------------------------------------------------------------------
+  # Example: Actor mode — all your recent workflow runs across a repo
+  # ---------------------------------------------------------------------------
+  # - url: https://github.com/owner/repository/actions?query=actor%3Ausername
+  #   name: "My Runs"
+  #   mode: "actor"
+  #   polling_rate: 120
+  #   max_runs: 10              # Max rows to show (default: 10)
+  #   stale_after: 300          # Seconds before removing a stale row (default: 300)
+  #   filter: "all"             # "all" or "failed" — only show failed runs (default: "all")
+  #
+
+  # Example with a real URL (actor mode, failed only):
+  # - url: https://github.com/summitnl/HippoCampus/actions?query=actor%3Ausername
+  #   name: "My Failed Runs"
+  #   mode: "actor"
+  #   filter: "failed"
+  #   polling_rate: 120
   # ---------------------------------------------------------------------------

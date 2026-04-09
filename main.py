@@ -247,6 +247,29 @@ def parse_workflow_url(url: str) -> tuple[str, str, str, Optional[str]]:
     return owner, repo, workflow_file, branch
 
 
+def parse_actor_url(url: str) -> tuple[str, str, Optional[str]]:
+    """Parse a GitHub Actions actor URL like:
+      https://github.com/owner/repo/actions?query=actor%3Ausername
+    Returns (owner, repo, actor_username_or_None).
+    """
+    parsed = urlparse(url)
+    parts = parsed.path.strip("/").split("/")
+    if len(parts) < 3 or parts[2] != "actions":
+        raise ValueError(f"Cannot parse actor URL: {url}")
+    owner = parts[0]
+    repo = parts[1]
+
+    actor = None
+    qs = parse_qs(parsed.query)
+    if "query" in qs:
+        raw_query = unquote(qs["query"][0])
+        m = re.search(r"actor[:\s]+(\S+)", raw_query)
+        if m:
+            actor = m.group(1)
+
+    return owner, repo, actor
+
+
 def fetch_latest_run(
     owner: str,
     repo: str,
@@ -318,6 +341,30 @@ def fetch_pr_runs(
         f"/actions/workflows/{workflow_file}/runs"
     )
     params = {"actor": actor, "event": "pull_request", "per_page": per_page}
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    resp = requests.get(api_url, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json().get("workflow_runs", [])
+
+
+def fetch_actor_runs(
+    owner: str,
+    repo: str,
+    actor: str,
+    token: str,
+    per_page: int = 20,
+    conclusion: Optional[str] = None,
+) -> list[dict]:
+    """Fetch recent workflow runs for a user across all workflows in a repo."""
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
+    params: dict = {"actor": actor, "per_page": per_page}
+    if conclusion:
+        params["conclusion"] = conclusion
     headers = {
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
@@ -878,6 +925,172 @@ class PRWorkflowPoller(WorkflowPoller):
             return is_draft
         except Exception:
             return False
+
+
+# ---------------------------------------------------------------------------
+# Actor-mode poller
+# ---------------------------------------------------------------------------
+class ActorWorkflowPoller(WorkflowPoller):
+    """Poller that shows one row per recent workflow run by the authenticated user."""
+
+    def __init__(self, wid, cfg_entry, config_mgr, event_queue):
+        super().__init__(wid, cfg_entry, config_mgr, event_queue)
+        # Parse actor URL (overwrite parent's owner/repo which may be empty)
+        url = cfg_entry.get("url", "")
+        try:
+            owner, repo, _ = parse_actor_url(url)
+            self.owner = owner
+            self.repo = repo
+        except ValueError:
+            pass
+        self._max_runs = int(cfg_entry.get("max_runs", 10))
+        self._stale_after = int(cfg_entry.get("stale_after", 300))
+        self._filter = cfg_entry.get("filter", "all")
+        # Per-run tracking, keyed by composite "workflow_id:head_branch"
+        self._prev_run_ids:     dict[str, int] = {}
+        self._prev_statuses:    dict[str, str] = {}
+        self._prev_conclusions: dict[str, Optional[str]] = {}
+        self._last_seen:        dict[str, datetime] = {}
+
+    def _poll(self):
+        cfg   = self.config_mgr.get()
+        token = cfg.get("github_token", "")
+        notif_cfg = cfg.get("notifications", {})
+
+        # Resolve username
+        try:
+            username = fetch_github_username(token)
+        except Exception as exc:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
+            state.status = ST_UNKNOWN
+            state.error = f"Cannot resolve GitHub user: {exc}"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+        if not username:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
+            state.status = ST_UNKNOWN
+            state.error = "No token configured (actor mode requires a token)"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+
+        if not self.owner:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
+            state.status = ST_UNKNOWN
+            state.error = "Invalid actor URL in config"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+
+        conclusion_filter = "failure" if self._filter == "failed" else None
+        try:
+            runs = fetch_actor_runs(
+                self.owner, self.repo, username, token,
+                per_page=self._max_runs * 3,
+                conclusion=conclusion_filter,
+            )
+        except requests.HTTPError as exc:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
+            state.status = ST_UNKNOWN
+            state.error = f"HTTP {exc.response.status_code}"
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+        except Exception as exc:
+            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
+            state.status = ST_UNKNOWN
+            state.error = str(exc)
+            self.event_queue.put(StatusEvent(self.wid, state))
+            return
+
+        # Client-side filter: when filter is "failed", also keep in-progress runs
+        if self._filter == "failed":
+            runs = [r for r in runs if r.get("conclusion") in ("failure", "timed_out", "action_required", None)]
+
+        # Group by workflow+branch, take latest per combo
+        by_key: dict[str, dict] = {}
+        for run in runs:
+            wf_name = run.get("name", "")
+            hb = run.get("head_branch", "")
+            composite = f"{wf_name}:{hb}"
+            if composite not in by_key:
+                by_key[composite] = run
+
+        active_keys = dict(list(by_key.items())[:self._max_runs])
+        now = datetime.now()
+
+        for composite_key, run in active_keys.items():
+            self._last_seen[composite_key] = now
+
+            run_id     = run.get("id")
+            api_status = run.get("status")
+            conclusion = run.get("conclusion")
+            hb         = run.get("head_branch", "")
+            wf_name    = run.get("name", "unknown")
+
+            state = WorkflowState(
+                name=wf_name,
+                url=self.cfg_entry.get("url", ""),
+                branch=hb,
+                head_branch=hb,
+            )
+            state.last_check = now
+
+            if api_status == "completed":
+                state.status = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
+            elif api_status == "in_progress":
+                state.status = ST_RUNNING
+            elif api_status == "queued":
+                state.status = ST_QUEUED
+            else:
+                state.status = ST_UNKNOWN
+
+            state.run_id     = run_id
+            state.run_url    = run.get("html_url")
+            state.run_number = run.get("run_number")
+            state.started_at = run.get("run_started_at") or run.get("created_at")
+            state.conclusion = conclusion
+
+            # Parse branch prefix
+            if hb:
+                prefix, short = parse_branch_prefix(hb)
+                state.branch_prefix = prefix
+                state.branch_short  = short
+
+            # Determine notification
+            notif_type: Optional[str] = None
+            prev_rid = self._prev_run_ids.get(composite_key)
+            prev_st  = self._prev_statuses.get(composite_key)
+            if prev_rid is not None and run_id != prev_rid:
+                notif_type = "new_run"
+            elif (
+                run_id == prev_rid
+                and api_status == "completed"
+                and prev_st != "completed"
+            ):
+                if state.status == ST_SUCCESS:
+                    notif_type = "success"
+                elif state.status == ST_FAILURE:
+                    notif_type = "failure"
+
+            self._prev_run_ids[composite_key]     = run_id
+            self._prev_statuses[composite_key]    = api_status
+            self._prev_conclusions[composite_key] = conclusion
+
+            self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=composite_key))
+
+            if notif_type:
+                self._fire_notification(notif_type, state, notif_cfg, is_pr=False)
+
+        # Detect stale entries
+        for key in list(self._last_seen.keys()):
+            if key in active_keys:
+                continue
+            elapsed = (now - self._last_seen[key]).total_seconds()
+            if elapsed >= self._stale_after:
+                dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
+                self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=key, removed=True))
+                del self._last_seen[key]
+                self._prev_run_ids.pop(key, None)
+                self._prev_statuses.pop(key, None)
+                self._prev_conclusions.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1479,12 +1692,12 @@ class MainWindow:
         NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 3)))
         workflows = cfg.get("workflows") or []
 
-        # Build sections: group consecutive branch-mode entries; each PR entry gets its own section
+        # Build sections: branch-mode entries share one section; PR/actor each get their own
         branch_container = None
         for wid, entry in enumerate(workflows):
             mode = entry.get("mode", "branch")
-            if mode == "pr":
-                name = entry.get("name") or entry.get("url", "PR Workflows")
+            if mode in ("pr", "actor"):
+                name = entry.get("name") or entry.get("url", "PR Workflows" if mode == "pr" else "My Runs")
                 container = self._create_section(name)
             else:
                 if branch_container is None:
@@ -1511,6 +1724,9 @@ class MainWindow:
         if mode == "pr":
             # PR mode: rows are created dynamically, no initial row
             poller = PRWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
+        elif mode == "actor":
+            # Actor mode: rows are created dynamically, no initial row
+            poller = ActorWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
         else:
             branch   = entry.get("branch") or url_branch
             name     = entry.get("name") or wf_file or url
