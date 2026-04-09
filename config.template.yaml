@@ -40,11 +40,15 @@ notifications:
   # Notify when a new workflow run starts
   new_run:
     enabled: true
-    # Sound options:
-    #   "default"        - use the Windows default notification sound
+    # Sound options (named sounds play in sync with the notification flyout):
+    #   "whistle"        - short IM-style chime (default for new runs)
+    #   "default"        - Windows default notification sound
+    #   "reminder"       - reminder tone
+    #   "mail"           - mail notification sound
+    #   "sms"            - SMS notification sound
     #   "none"           - no sound
-    #   "C:/path/to.wav" - path to a custom .wav file
-    sound: default
+    #   "C:/path/to.wav" - path to a custom .wav file (plays independently)
+    sound: whistle
 
   # Notify when a workflow run fails (conclusion: failure, timed_out, etc.)
   failure:

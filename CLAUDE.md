@@ -98,6 +98,10 @@ PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
 
 The `CONCLUSION_MAP` translates GitHub's `conclusion` field values into internal `ST_*` constants. `None` conclusion (run still active) maps to `ST_RUNNING`.
 
+### Named sounds
+
+`_NAMED_SOUNDS` maps friendly names (`"whistle"`, `"default"`, `"reminder"`, etc.) to `winotify.audio` presets. When a sound config value matches a named sound, `NotificationManager._send()` couples it to the toast via `set_audio()` so the sound plays exactly when the flyout appears. Custom `.wav` file paths bypass this and fall back to `_play_sound()`. Adding a new named sound requires adding it to `_NAMED_SOUNDS` and documenting it in `config.template.yaml`.
+
 ### Auto-update check
 
 On startup (before the main window), `UpdateChecker.check()` runs `git fetch origin main` and compares local HEAD against `origin/main`. If behind, a modal dialog offers to pull + restart. All git/network errors are silently ignored so the app always starts.

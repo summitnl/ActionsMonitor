@@ -63,6 +63,7 @@ except ImportError:
 
 try:
     from winotify import Notification as _WinNotification
+    from winotify import audio as _winotify_audio
     WINOTIFY_AVAILABLE = True
 except ImportError:
     WINOTIFY_AVAILABLE = False
@@ -126,6 +127,18 @@ FG_MUTED   = "#7F849C"
 FG_LINK    = "#89B4FA"
 ACCENT     = "#313244"
 
+# Named sounds → winotify audio presets (Windows toast-coupled sounds)
+# These play in sync with the notification flyout instead of independently.
+_NAMED_SOUNDS: dict[str, object] = {}
+if WINOTIFY_AVAILABLE:
+    _NAMED_SOUNDS = {
+        "default":  _winotify_audio.Default,
+        "whistle":  _winotify_audio.IM,
+        "reminder": _winotify_audio.Reminder,
+        "mail":     _winotify_audio.Mail,
+        "sms":      _winotify_audio.SMS,
+    }
+
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
@@ -133,7 +146,7 @@ DEFAULT_CONFIG: dict = {
     "github_token": "",
     "notifications": {
         "batch_window": 3,
-        "new_run":  {"enabled": True,  "sound": "default"},
+        "new_run":  {"enabled": True,  "sound": "whistle"},
         "failure":  {"enabled": True,  "sound": "default"},
         "success":  {"enabled": True,  "sound": "none"},
     },
@@ -465,6 +478,7 @@ class NotificationManager:
 
     # -- low-level send / sound ----------------------------------------------
     def _send(self, title: str, message: str, sound_cfg: str, url: Optional[str] = None):
+        sound_coupled = False
         if IS_WINDOWS and WINOTIFY_AVAILABLE:
             try:
                 toast = _WinNotification(
@@ -475,6 +489,11 @@ class NotificationManager:
                 )
                 if url:
                     toast.add_actions(label="Open workflow", launch=url)
+                # Couple sound to toast so it plays when the flyout appears
+                winotify_sound = _NAMED_SOUNDS.get(sound_cfg)
+                if winotify_sound and sound_cfg != "none":
+                    toast.set_audio(winotify_sound, loop=False)
+                    sound_coupled = True
                 toast.show()
             except Exception:
                 pass
@@ -488,8 +507,9 @@ class NotificationManager:
                 )
             except Exception:
                 pass
-        # Sound
-        self._play_sound(sound_cfg)
+        # Only play sound separately if it wasn't coupled to the toast
+        if not sound_coupled:
+            self._play_sound(sound_cfg)
 
     def _play_sound(self, sound_cfg: str):
         if sound_cfg == "none" or not sound_cfg:
