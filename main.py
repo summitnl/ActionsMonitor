@@ -84,6 +84,7 @@ if IS_WINDOWS:
 APP_NAME    = "Actions Monitor"
 APP_VERSION = "1.0"
 CONFIG_FILE = Path(__file__).parent / "config.yaml"
+APP_ICO     = Path(__file__).parent / "app.ico"
 
 POLL_DEFAULT = 60  # seconds
 
@@ -882,11 +883,33 @@ class PRWorkflowPoller(WorkflowPoller):
 # ---------------------------------------------------------------------------
 # Icon creation helpers
 # ---------------------------------------------------------------------------
-def _make_icon_image(colour: str, size: int = 64) -> Image.Image:
-    img  = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+def _make_base_icon(size: int = 64) -> Image.Image:
+    """App icon: green play triangle on dark rounded-rect background."""
+    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pad  = size // 8
-    draw.ellipse([pad, pad, size - pad, size - pad], fill=colour)
+    pad = size // 16
+    radius = size // 5
+    draw.rounded_rectangle([pad, pad, size - pad, size - pad],
+                           radius=radius, fill="#2A2A3E")
+    cx, cy = size // 2, size // 2
+    offset = size // 16
+    s = int(size * 0.30)
+    draw.polygon([(cx - s + offset, cy - s),
+                  (cx + s + offset, cy),
+                  (cx - s + offset, cy + s)], fill="#2ECC71")
+    return img
+
+
+def _make_icon_image(colour: str, size: int = 64) -> Image.Image:
+    img = _make_base_icon(size)
+    # Overlay a coloured status dot in the bottom-right corner
+    draw = ImageDraw.Draw(img)
+    dot_r = size // 5
+    x = size - dot_r - 1
+    y = size - dot_r - 1
+    # White outline for contrast
+    draw.ellipse([x - dot_r - 1, y - dot_r - 1, x + dot_r + 1, y + dot_r + 1], fill="#FFFFFF")
+    draw.ellipse([x - dot_r, y - dot_r, x + dot_r, y + dot_r], fill=colour)
     return img
 
 
@@ -1210,6 +1233,8 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
     """Show a modal dark-themed update dialog."""
     dlg = tk.Toplevel(root)
     dlg.title(f"{APP_NAME} — Update Available")
+    if APP_ICO.exists():
+        dlg.iconbitmap(str(APP_ICO))
     dlg.configure(bg=BG_DARK)
     dlg.resizable(False, False)
 
@@ -1299,6 +1324,8 @@ class MainWindow:
 
         self._root = tk.Tk()
         self._root.title(APP_NAME)
+        if APP_ICO.exists():
+            self._root.iconbitmap(str(APP_ICO))
         self._root.configure(bg=BG_DARK)
         self._root.resizable(True, True)
         self._root.geometry("560x420")
