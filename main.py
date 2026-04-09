@@ -1321,6 +1321,8 @@ class MainWindow:
         self._states:  dict[tuple[int, Optional[str]], WorkflowState]  = {}
         self._rows:    dict[tuple[int, Optional[str]], WorkflowRow]     = {}
         self._tray: Optional[TrayManager] = None
+        self._sections: list[tk.Frame] = []           # section header+container frames
+        self._wid_container: dict[int, tk.Frame] = {} # wid → section content frame
 
         self._root = tk.Tk()
         self._root.title(APP_NAME)
@@ -1442,6 +1444,33 @@ class MainWindow:
             StartupManager.disable()
 
     # ------------------------------------------------------------------
+    # Sections
+    # ------------------------------------------------------------------
+    def _create_section(self, title: str) -> tk.Frame:
+        """Create a section header + content frame and return the content frame."""
+        section = tk.Frame(self._list_frame, bg=BG_DARK)
+        section.pack(fill=tk.X)
+        self._sections.append(section)
+
+        hdr = tk.Frame(section, bg=BG_DARK)
+        hdr.pack(fill=tk.X, padx=10, pady=(8, 2))
+        tk.Label(hdr, text=title, font=("Segoe UI", 8, "bold"),
+                 bg=BG_DARK, fg=FG_MUTED, anchor="w").pack(side=tk.LEFT)
+        # Horizontal rule
+        sep = tk.Frame(hdr, bg=ACCENT, height=1)
+        sep.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0), pady=1)
+
+        content = tk.Frame(section, bg=BG_DARK)
+        content.pack(fill=tk.X)
+        return content
+
+    def _destroy_sections(self):
+        for sec in self._sections:
+            sec.destroy()
+        self._sections.clear()
+        self._wid_container.clear()
+
+    # ------------------------------------------------------------------
     # Pollers
     # ------------------------------------------------------------------
     def _start_pollers(self):
@@ -1449,6 +1478,20 @@ class MainWindow:
         notif_cfg = cfg.get("notifications", {})
         NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 3)))
         workflows = cfg.get("workflows") or []
+
+        # Build sections: group consecutive branch-mode entries; each PR entry gets its own section
+        branch_container = None
+        for wid, entry in enumerate(workflows):
+            mode = entry.get("mode", "branch")
+            if mode == "pr":
+                name = entry.get("name") or entry.get("url", "PR Workflows")
+                container = self._create_section(name)
+            else:
+                if branch_container is None:
+                    branch_container = self._create_section("Workflows")
+                container = branch_container
+            self._wid_container[wid] = container
+
         for wid, entry in enumerate(workflows):
             self._add_poller(wid, entry)
 
@@ -1463,6 +1506,8 @@ class MainWindow:
             wf_file = url
             url_branch = None
 
+        container = self._wid_container.get(wid, self._list_frame)
+
         if mode == "pr":
             # PR mode: rows are created dynamically, no initial row
             poller = PRWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
@@ -1474,7 +1519,7 @@ class MainWindow:
             self._states[key] = state
 
             alt = len(self._rows) % 2 == 1
-            row = WorkflowRow(self._list_frame, wid, state, alt)
+            row = WorkflowRow(container, wid, state, alt)
             poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
             row.update(state, poll_rate)
             self._rows[key] = row
@@ -1522,9 +1567,10 @@ class MainWindow:
             if row:
                 row.update(event.new_state, poll_rate)
             elif event.sub_key is not None:
-                # Dynamically create a new PR row
+                # Dynamically create a new PR row inside its section container
+                container = self._wid_container.get(event.workflow_id, self._list_frame)
                 alt = len(self._rows) % 2 == 1
-                new_row = WorkflowRow(self._list_frame, event.workflow_id, event.new_state, alt)
+                new_row = WorkflowRow(container, event.workflow_id, event.new_state, alt)
                 new_row.update(event.new_state, poll_rate)
                 self._rows[key] = new_row
 
@@ -1556,10 +1602,9 @@ class MainWindow:
     def _reload_pollers(self):
         global _cached_github_username
         self._stop_all_pollers()
-        for row in self._rows.values():
-            row.frame.destroy()
         self._rows.clear()
         self._states.clear()
+        self._destroy_sections()
         # Reset cached username so a token change takes effect
         with _github_username_lock:
             _cached_github_username = None
