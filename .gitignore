@@ -1,6 +1,9 @@
 # User config — contains secrets (github_token), never commit this
 config.yaml
 
+# Window state (position/size) — per-machine, not portable
+state.json
+
 # Python
 __pycache__/
 *.py[cod]

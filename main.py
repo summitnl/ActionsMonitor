@@ -5,6 +5,9 @@ Actions Monitor — Lightweight GitHub Actions workflow status monitor.
 
 from __future__ import annotations
 
+import ctypes
+import ctypes.wintypes
+import json
 import os
 import sys
 import platform
@@ -84,6 +87,7 @@ if IS_WINDOWS:
 APP_NAME    = "Actions Monitor"
 APP_VERSION = "1.0"
 CONFIG_FILE = Path(__file__).parent / "config.yaml"
+STATE_FILE  = Path(__file__).parent / "state.json"
 APP_ICO     = Path(__file__).parent / "app.ico"
 
 POLL_DEFAULT = 60  # seconds
@@ -1524,6 +1528,57 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
 
 
 # ---------------------------------------------------------------------------
+# Window state persistence
+# ---------------------------------------------------------------------------
+def _get_monitor_work_areas() -> list[tuple[int, int, int, int]]:
+    """Return list of (left, top, right, bottom) work areas for all monitors."""
+    areas: list[tuple[int, int, int, int]] = []
+    try:
+        monitor_enum_proc = ctypes.WINFUNCTYPE(
+            ctypes.c_int,
+            ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(ctypes.wintypes.RECT), ctypes.c_double,
+        )
+
+        def callback(hmonitor, hdc, lprect, lparam):
+            info = ctypes.wintypes.RECT()
+            # MONITORINFO struct: cbSize (DWORD), rcMonitor (RECT), rcWork (RECT), dwFlags (DWORD)
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", ctypes.wintypes.DWORD),
+                    ("rcMonitor", ctypes.wintypes.RECT),
+                    ("rcWork", ctypes.wintypes.RECT),
+                    ("dwFlags", ctypes.wintypes.DWORD),
+                ]
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if ctypes.windll.user32.GetMonitorInfoW(hmonitor, ctypes.byref(mi)):
+                rc = mi.rcWork
+                areas.append((rc.left, rc.top, rc.right, rc.bottom))
+            return 1  # continue enumeration
+
+        ctypes.windll.user32.EnumDisplayMonitors(
+            None, None, monitor_enum_proc(callback), 0,
+        )
+    except Exception:
+        pass
+    return areas
+
+
+def _rect_overlaps(
+    x: int, y: int, w: int, h: int,
+    areas: list[tuple[int, int, int, int]],
+    min_visible: int = 100,
+) -> bool:
+    """Check if at least min_visible pixels of the window overlap any monitor."""
+    for left, top, right, bottom in areas:
+        overlap_x = max(0, min(x + w, right) - max(x, left))
+        overlap_y = max(0, min(y + h, bottom) - max(y, top))
+        if overlap_x >= min_visible and overlap_y >= min(50, min_visible):
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow:
@@ -1545,6 +1600,7 @@ class MainWindow:
         self._root.resizable(True, True)
         self._root.geometry("560x420")
         self._root.minsize(400, 200)
+        self._restore_window_state()
 
         self._build_ui()
         self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
@@ -1832,6 +1888,62 @@ class MainWindow:
     def set_tray(self, tray: TrayManager):
         self._tray = tray
 
+    # ------------------------------------------------------------------
+    # Window state persistence
+    # ------------------------------------------------------------------
+    def _save_window_state(self):
+        """Save current window geometry to state.json."""
+        try:
+            state = {}
+            if STATE_FILE.exists():
+                with open(STATE_FILE, encoding="utf-8") as fh:
+                    state = json.load(fh)
+            state["window"] = {
+                "x": self._root.winfo_x(),
+                "y": self._root.winfo_y(),
+                "width": self._root.winfo_width(),
+                "height": self._root.winfo_height(),
+            }
+            with open(STATE_FILE, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+        except Exception as exc:
+            print(f"[State] Save error: {exc}")
+
+    def _restore_window_state(self):
+        """Restore window geometry from state.json, clamped to visible monitors."""
+        try:
+            if not STATE_FILE.exists():
+                return
+            with open(STATE_FILE, encoding="utf-8") as fh:
+                state = json.load(fh)
+            win = state.get("window")
+            if not win:
+                return
+
+            x = int(win["x"])
+            y = int(win["y"])
+            w = max(int(win["width"]), 400)
+            h = max(int(win["height"]), 200)
+
+            # Check visibility against monitor work areas
+            areas = _get_monitor_work_areas()
+            if areas and not _rect_overlaps(x, y, w, h, areas):
+                # Window would be off-screen — keep size but reset position
+                self._root.geometry(f"{w}x{h}")
+                return
+
+            if not areas:
+                # Fallback: single-monitor check via tkinter
+                sw = self._root.winfo_screenwidth()
+                sh = self._root.winfo_screenheight()
+                if x + w < 100 or x > sw - 100 or y + h < 50 or y > sh - 50:
+                    self._root.geometry(f"{w}x{h}")
+                    return
+
+            self._root.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception as exc:
+            print(f"[State] Restore error: {exc}")
+
     def _hide_window(self):
         self._root.withdraw()
 
@@ -1845,6 +1957,7 @@ class MainWindow:
             self._root.withdraw()
 
     def _quit(self):
+        self._save_window_state()
         self._stop_all_pollers()
         if self._tray:
             self._tray.stop()
