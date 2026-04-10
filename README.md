@@ -31,6 +31,14 @@ That's it. The script installs all Python dependencies and creates a `config.yam
 
 To start it manually afterwards, double-click `run.bat`.
 
+### Building a standalone `.exe`
+
+```
+build.bat
+```
+
+Produces `dist\ActionsMonitor.exe` — a single file with the icon embedded. Place your `config.yaml` next to it.
+
 ## Configuration
 
 Open `config.yaml` (or click **Open config ↗** in the app footer). The file is heavily commented — the key things to fill in are:
@@ -147,7 +155,7 @@ pip install -r requirements.txt
 
 ### 2026-04-10
 
-- **Remember window position & size** — the app now saves its geometry to `state.json` on exit and restores it on next launch. If the saved position would be off-screen (e.g., after a resolution or monitor change), the size is kept but the position resets to the default. Multi-monitor setups are fully supported via Windows monitor enumeration.
+- **Visual refresh & UX improvements** — warm dark theme (stone/amber palette), Lucide-inspired status icons rendered with PIL (checkmark, X, loader, clock, ban, skip, question mark), coloured left accent bars on rows, amber section headers, themed scrollbar, and refined spacing throughout. PR rows now show just the PR number and branch name (the workflow name is in the section header). Badges like DRAFT and branch prefix sit on their own line. The app remembers its window position and size across restarts (`state.json`), with multi-monitor–aware clamping so it never restores off-screen. Added PyInstaller support (`build.bat`) to produce a single `.exe` with the icon embedded.
 
 ### 2026-04-09
 

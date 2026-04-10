@@ -10,3 +10,8 @@ __pycache__/
 *.pyo
 .venv/
 venv/
+
+# PyInstaller build artifacts
+build/
+dist/
+*.spec

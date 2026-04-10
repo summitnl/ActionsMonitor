@@ -39,7 +39,7 @@ try:
 except ImportError:
     _missing.append("pyyaml")
 try:
-    from PIL import Image, ImageDraw, ImageFont
+    from PIL import Image, ImageDraw, ImageFont, ImageTk
 except ImportError:
     _missing.append("Pillow")
 try:
@@ -86,9 +86,17 @@ if IS_WINDOWS:
 # ---------------------------------------------------------------------------
 APP_NAME    = "Actions Monitor"
 APP_VERSION = "1.0"
-CONFIG_FILE = Path(__file__).parent / "config.yaml"
-STATE_FILE  = Path(__file__).parent / "state.json"
-APP_ICO     = Path(__file__).parent / "app.ico"
+
+# When frozen by PyInstaller, __file__ points to a temp dir.
+# Use the executable's directory instead so config/state live next to the .exe.
+if getattr(sys, "frozen", False):
+    _APP_DIR = Path(sys.executable).parent
+else:
+    _APP_DIR = Path(__file__).parent
+
+CONFIG_FILE = _APP_DIR / "config.yaml"
+STATE_FILE  = _APP_DIR / "state.json"
+APP_ICO     = _APP_DIR / "app.ico"
 
 POLL_DEFAULT = 60  # seconds
 
@@ -101,15 +109,26 @@ ST_FAILURE    = "failure"
 ST_CANCELLED  = "cancelled"
 ST_SKIPPED    = "skipped"
 
-# Colour palette
+# Colour palette — warm dark theme
 COLOUR = {
-    ST_UNKNOWN:   "#95A5A6",  # grey
-    ST_QUEUED:    "#F39C12",  # orange
-    ST_RUNNING:   "#F39C12",  # orange
-    ST_SUCCESS:   "#2ECC71",  # green
-    ST_FAILURE:   "#E74C3C",  # red
-    ST_CANCELLED: "#95A5A6",  # grey
-    ST_SKIPPED:   "#95A5A6",  # grey
+    ST_UNKNOWN:   "#A8A29E",  # warm grey (stone-400)
+    ST_QUEUED:    "#FBBF24",  # amber
+    ST_RUNNING:   "#FBBF24",  # amber
+    ST_SUCCESS:   "#4ADE80",  # warm green
+    ST_FAILURE:   "#F87171",  # warm red
+    ST_CANCELLED: "#A8A29E",  # warm grey
+    ST_SKIPPED:   "#A8A29E",  # warm grey
+}
+
+# Background fills for status icon circles (white glyph on top)
+COLOUR_BG = {
+    ST_UNKNOWN:   "#8C857F",  # stone-450
+    ST_QUEUED:    "#CA8A04",  # amber-550
+    ST_RUNNING:   "#CA8A04",  # amber-550
+    ST_SUCCESS:   "#22994D",  # green-550
+    ST_FAILURE:   "#C53030",  # red-550
+    ST_CANCELLED: "#8C857F",  # stone-450
+    ST_SKIPPED:   "#8C857F",  # stone-450
 }
 
 CONCLUSION_MAP = {
@@ -123,14 +142,14 @@ CONCLUSION_MAP = {
     None:               ST_RUNNING,
 }
 
-# UI colours
-BG_DARK    = "#1E1E2E"
-BG_ROW     = "#2A2A3E"
-BG_ROW_ALT = "#252535"
-FG_TEXT    = "#CDD6F4"
-FG_MUTED   = "#7F849C"
-FG_LINK    = "#89B4FA"
-ACCENT     = "#313244"
+# UI colours — warm dark base
+BG_DARK    = "#1C1917"   # stone-900
+BG_ROW     = "#292524"   # stone-800
+BG_ROW_ALT = "#231F1E"   # between stone-800 and 900
+FG_TEXT    = "#E7E5E4"   # stone-200
+FG_MUTED   = "#A8A29E"   # stone-400
+FG_LINK    = "#FBBF24"   # amber-400 (primary accent)
+ACCENT     = "#292524"   # stone-800
 
 # Named sounds → winotify audio presets (Windows toast-coupled sounds)
 # These play in sync with the notification flyout instead of independently.
@@ -1098,36 +1117,208 @@ class ActorWorkflowPoller(WorkflowPoller):
 
 
 # ---------------------------------------------------------------------------
-# Icon creation helpers
+# Icon creation helpers — Lucide-inspired, rendered with PIL
 # ---------------------------------------------------------------------------
+_ICON_GLYPH = "#FFFFFF"  # white glyph on coloured circle — max contrast at small size
+
+def _s(val: float, size: int, svg_size: float = 24.0, pad_frac: float = 0.18) -> float:
+    """Scale an SVG coordinate to image space with padding."""
+    usable = size * (1 - 2 * pad_frac)
+    return val / svg_size * usable + size * pad_frac
+
+
+def _sw(size: int) -> int:
+    """Bold stroke width for small-icon legibility."""
+    return max(3, round(size / 24 * 3.2))
+
+
+def _icon_base(size: int, ss: int = 4) -> tuple[Image.Image, ImageDraw.Draw, int]:
+    """Create a supersampled RGBA canvas and return (img, draw, hi_size)."""
+    hi = size * ss
+    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+    return img, ImageDraw.Draw(img), hi
+
+
+def _fill_circle(draw: ImageDraw.Draw, hi: int, colour: str):
+    """Filled circle — no outline, just the solid status colour."""
+    pad = hi * 0.04
+    draw.ellipse([pad, pad, hi - pad, hi - pad], fill=colour)
+
+
+def _draw_lucide_circle_check(size: int, bg_fill: str) -> Image.Image:
+    """Checkmark on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    # Bold checkmark: (8,12)→(11,15)→(16,9)
+    pts = [(_s(8, hi), _s(12.5, hi)), (_s(11, hi), _s(15.5, hi)), (_s(16.5, hi), _s(9, hi))]
+    draw.line(pts, fill=_ICON_GLYPH, width=sw, joint="curve")
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _draw_lucide_circle_x(size: int, bg_fill: str) -> Image.Image:
+    """X mark on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    # Bold X
+    draw.line([(_s(9, hi), _s(9, hi)), (_s(15, hi), _s(15, hi))], fill=_ICON_GLYPH, width=sw)
+    draw.line([(_s(15, hi), _s(9, hi)), (_s(9, hi), _s(15, hi))], fill=_ICON_GLYPH, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _draw_lucide_loader(size: int, bg_fill: str) -> Image.Image:
+    """Partial arc (spinner) on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    r = hi * 0.30
+    cx, cy = hi / 2, hi / 2
+    draw.arc([cx - r, cy - r, cx + r, cy + r], start=-60, end=240,
+             fill=_ICON_GLYPH, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _draw_lucide_clock(size: int, bg_fill: str) -> Image.Image:
+    """Clock face on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    # Circle outline for clock face
+    r = hi * 0.30
+    cx, cy = hi / 2, hi / 2
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=_ICON_GLYPH, width=sw)
+    # Clock hands: 12 o'clock down to center, then to ~2 o'clock
+    draw.line([(cx, cy - r * 0.65), (cx, cy), (cx + r * 0.55, cy + r * 0.35)],
+              fill=_ICON_GLYPH, width=sw, joint="curve")
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _draw_lucide_ban(size: int, bg_fill: str) -> Image.Image:
+    """Ban/slash on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    # Diagonal slash
+    draw.line([(_s(6, hi), _s(6, hi)), (_s(18, hi), _s(18, hi))],
+              fill=_ICON_GLYPH, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _draw_lucide_skip_forward(size: int, bg_fill: str) -> Image.Image:
+    """Skip-forward on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    # Filled play triangle + bar
+    tri = [(_s(7, hi), _s(7, hi)), (_s(14.5, hi), _s(12, hi)), (_s(7, hi), _s(17, hi))]
+    draw.polygon(tri, fill=_ICON_GLYPH)
+    draw.line([(_s(16.5, hi), _s(7, hi)), (_s(16.5, hi), _s(17, hi))],
+              fill=_ICON_GLYPH, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _draw_lucide_circle_help(size: int, bg_fill: str) -> Image.Image:
+    """Question mark on coloured circle."""
+    img, draw, hi = _icon_base(size)
+    _fill_circle(draw, hi, bg_fill)
+    sw = _sw(hi)
+    # Question mark — use a font for clean rendering
+    try:
+        fsize = int(hi * 0.52)
+        font = ImageFont.truetype("segoeuib.ttf", fsize)  # Segoe UI Bold
+    except Exception:
+        font = ImageFont.load_default()
+    bbox = draw.textbbox((0, 0), "?", font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx = (hi - tw) / 2 - bbox[0]
+    ty = (hi - th) / 2 - bbox[1]
+    draw.text((tx, ty), "?", fill=_ICON_GLYPH, font=font)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+# Map status → icon drawing function
+_STATUS_ICON_FUNC = {
+    ST_SUCCESS:   _draw_lucide_circle_check,
+    ST_FAILURE:   _draw_lucide_circle_x,
+    ST_RUNNING:   _draw_lucide_loader,
+    ST_QUEUED:    _draw_lucide_clock,
+    ST_CANCELLED: _draw_lucide_ban,
+    ST_SKIPPED:   _draw_lucide_skip_forward,
+    ST_UNKNOWN:   _draw_lucide_circle_help,
+}
+
+
+def _make_status_icon(status: str, size: int = 32) -> Image.Image:
+    """Generate a Lucide-style status icon with coloured background circle."""
+    bg_fill = COLOUR_BG.get(status, COLOUR_BG[ST_UNKNOWN])
+    func = _STATUS_ICON_FUNC.get(status, _draw_lucide_circle_help)
+    return func(size, bg_fill)
+
+
+# --- App / tray icon (play triangle on dark rounded rect + status dot) ---
+
 def _make_base_icon(size: int = 64) -> Image.Image:
-    """App icon: green play triangle on dark rounded-rect background."""
-    img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    """App icon: amber play triangle on dark rounded-rect background."""
+    ss = 4
+    hi = size * ss
+    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
-    pad = size // 16
-    radius = size // 5
-    draw.rounded_rectangle([pad, pad, size - pad, size - pad],
-                           radius=radius, fill="#2A2A3E")
-    cx, cy = size // 2, size // 2
-    offset = size // 16
-    s = int(size * 0.30)
-    draw.polygon([(cx - s + offset, cy - s),
-                  (cx + s + offset, cy),
-                  (cx - s + offset, cy + s)], fill="#2ECC71")
-    return img
+
+    pad = hi // 16
+    radius = hi // 4
+    draw.rounded_rectangle([pad, pad, hi - pad, hi - pad],
+                           radius=radius, fill="#252220")
+    inner_pad = pad + hi // 32
+    inner_radius = radius - hi // 32
+    draw.rounded_rectangle([inner_pad, inner_pad, hi - inner_pad, hi - inner_pad],
+                           radius=inner_radius, fill="#2D2926")
+
+    # Play triangle — amber accent
+    cx, cy = hi // 2, hi // 2
+    offset = hi // 12
+    s = int(hi * 0.26)
+    draw.polygon([
+        (cx - s + offset, cy - int(s * 1.15)),
+        (cx + int(s * 1.1) + offset, cy),
+        (cx - s + offset, cy + int(s * 1.15)),
+    ], fill="#FBBF24")
+
+    return img.resize((size, size), Image.LANCZOS)
 
 
 def _make_icon_image(colour: str, size: int = 64) -> Image.Image:
+    """Base icon with a coloured status dot in the bottom-right corner."""
     img = _make_base_icon(size)
-    # Overlay a coloured status dot in the bottom-right corner
-    draw = ImageDraw.Draw(img)
-    dot_r = size // 5
-    x = size - dot_r - 1
-    y = size - dot_r - 1
-    # White outline for contrast
-    draw.ellipse([x - dot_r - 1, y - dot_r - 1, x + dot_r + 1, y + dot_r + 1], fill="#FFFFFF")
+    ss = 4
+    hi = size * ss
+    overlay = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay)
+
+    dot_r = hi // 5
+    x = hi - dot_r - ss
+    y = hi - dot_r - ss
+    draw.ellipse([x - dot_r - 3*ss, y - dot_r - 3*ss,
+                  x + dot_r + 3*ss, y + dot_r + 3*ss], fill="#1C1917")
+    draw.ellipse([x - dot_r - ss, y - dot_r - ss,
+                  x + dot_r + ss, y + dot_r + ss], fill="#FFFFFF")
     draw.ellipse([x - dot_r, y - dot_r, x + dot_r, y + dot_r], fill=colour)
+
+    overlay = overlay.resize((size, size), Image.LANCZOS)
+    img.paste(overlay, (0, 0), overlay)
     return img
+
+
+def _generate_app_ico() -> None:
+    """Generate app.ico with multiple sizes for crisp display at all scales."""
+    try:
+        sizes = [256, 48, 32, 16]  # largest first for proper ICO embedding
+        images = [_make_base_icon(s) for s in sizes]
+        images[0].save(str(APP_ICO), format="ICO",
+                       sizes=[(s, s) for s in sizes],
+                       append_images=images[1:])
+    except Exception as exc:
+        print(f"[Icon] Generate error: {exc}")
 
 
 def _combined_status(states: list[WorkflowState]) -> str:
@@ -1187,86 +1378,96 @@ STATUS_LABEL = {
     ST_SKIPPED:  "Skipped",
 }
 
-STATUS_SYMBOL = {
-    ST_UNKNOWN:  "●",
-    ST_QUEUED:   "●",
-    ST_RUNNING:  "◉",
-    ST_SUCCESS:  "●",
-    ST_FAILURE:  "●",
-    ST_CANCELLED:"●",
-    ST_SKIPPED:  "●",
-}
+# Pre-generated status icon PhotoImages (populated once the Tk root exists)
+_status_tk_icons: dict[str, ImageTk.PhotoImage] = {}
+_ICON_SIZE = 24  # px for row status icons
+
+
+def _init_status_icons():
+    """Generate and cache PhotoImage icons for all statuses. Call after Tk root exists."""
+    if _status_tk_icons:
+        return
+    for st in (ST_UNKNOWN, ST_QUEUED, ST_RUNNING, ST_SUCCESS,
+               ST_FAILURE, ST_CANCELLED, ST_SKIPPED):
+        img = _make_status_icon(st, _ICON_SIZE)
+        _status_tk_icons[st] = ImageTk.PhotoImage(img)
 
 
 class WorkflowRow:
-    HEIGHT = 52
 
     def __init__(self, parent: tk.Frame, wid: int, state: WorkflowState, alt: bool):
         self.wid    = wid
         self._state = state
         bg = BG_ROW_ALT if alt else BG_ROW
 
-        self.frame = tk.Frame(parent, bg=bg, height=self.HEIGHT)
-        self.frame.pack(fill=tk.X, padx=0, pady=1)
-        self.frame.pack_propagate(False)
+        self.frame = tk.Frame(parent, bg=bg)
+        self.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
 
-        # Status dot
-        self._dot = tk.Label(self.frame, text="●", font=("Segoe UI", 16),
-                             bg=bg, fg=COLOUR[state.status], width=2)
-        self._dot.pack(side=tk.LEFT, padx=(10, 4))
+        # Left accent bar (coloured strip indicating status)
+        self._accent = tk.Frame(self.frame, bg=COLOUR[state.status], width=3)
+        self._accent.pack(side=tk.LEFT, fill=tk.Y)
 
-        # Centre column
+        # Status icon (Lucide-style image)
+        icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
+        self._icon_lbl = tk.Label(self.frame, image=icon, bg=bg)
+        self._icon_lbl.image = icon  # prevent GC
+        self._icon_lbl.pack(side=tk.LEFT, padx=(12, 10), pady=8)
+
+        # Right column — polling rate (pack before centre so it reserves space)
+        self._poll_lbl = tk.Label(
+            self.frame, text="", font=("Segoe UI", 8),
+            bg=bg, fg=FG_MUTED, anchor="ne",
+        )
+        self._poll_lbl.pack(side=tk.RIGHT, padx=(4, 12), anchor="n", pady=(10, 0))
+
+        # Centre column (fills remaining space)
         centre = tk.Frame(self.frame, bg=bg)
-        centre.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=4)
+        centre.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=(8, 6))
 
-        # Top row: name + optional PR details (prefix, branch, draft)
+        # Line 1: workflow name + PR number + branch
         top_row = tk.Frame(centre, bg=bg)
         top_row.pack(fill=tk.X)
 
         self._name_lbl = tk.Label(
-            top_row, text=state.name, font=("Segoe UI", 10, "bold"),
-            bg=bg, fg=FG_LINK, cursor="hand2", anchor="w",
+            top_row, text=state.name, font=("Segoe UI", 9),
+            bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
         )
         self._name_lbl.pack(side=tk.LEFT)
         self._name_lbl.bind("<Button-1>", self._open_url)
 
         # Separator " / " between workflow name and PR info (hidden for non-PR)
         self._sep_lbl = tk.Label(
-            top_row, text=" / ", font=("Segoe UI", 10),
+            top_row, text=" / ", font=("Segoe UI", 9),
             bg=bg, fg=FG_MUTED, anchor="w",
         )
 
-        # Branch prefix badge (e.g. "hotfix")
-        self._prefix_lbl = tk.Label(
-            top_row, text="", font=("Segoe UI", 8),
-            bg="#3A3A50", fg="#B4BEFE", anchor="w", padx=4, pady=0,
-        )
-
-        # PR number + branch short name
+        # PR number + branch short name (becomes the title for PR rows)
         self._branch_lbl = tk.Label(
             top_row, text="", font=("Segoe UI", 9),
             bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
         )
         self._branch_lbl.bind("<Button-1>", self._open_url)
 
-        # DRAFT badge
-        self._draft_lbl = tk.Label(
-            top_row, text="DRAFT", font=("Segoe UI", 8, "bold"),
-            bg="#4A3820", fg="#F5A623", anchor="w", padx=4, pady=0,
+        # Line 2 (optional): badges row — prefix badge + DRAFT badge
+        self._badge_row = tk.Frame(centre, bg=bg)
+        # (only packed when badges are present)
+
+        self._prefix_lbl = tk.Label(
+            self._badge_row, text="", font=("Segoe UI", 7),
+            bg="#3D3530", fg="#FBBF24", anchor="w", padx=3, pady=0,
         )
 
+        self._draft_lbl = tk.Label(
+            self._badge_row, text="DRAFT", font=("Segoe UI", 7),
+            bg="#3D3520", fg="#FBBF24", anchor="w", padx=3, pady=0,
+        )
+
+        # Line 3: status text
         self._info_lbl = tk.Label(
             centre, text="", font=("Segoe UI", 8),
             bg=bg, fg=FG_MUTED, anchor="w",
         )
         self._info_lbl.pack(fill=tk.X)
-
-        # Right column — polling rate
-        self._poll_lbl = tk.Label(
-            self.frame, text="", font=("Segoe UI", 8),
-            bg=bg, fg=FG_MUTED, width=12, anchor="e",
-        )
-        self._poll_lbl.pack(side=tk.RIGHT, padx=(4, 10))
 
         self._bg = bg
         self._update_labels()
@@ -1278,7 +1479,12 @@ class WorkflowRow:
 
     def update(self, state: WorkflowState, poll_rate: int):
         self._state = state
-        self._dot.config(fg=COLOUR.get(state.status, COLOUR[ST_UNKNOWN]))
+        # Update accent bar colour
+        self._accent.config(bg=COLOUR.get(state.status, COLOUR[ST_UNKNOWN]))
+        # Update status icon
+        icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
+        self._icon_lbl.config(image=icon)
+        self._icon_lbl.image = icon
         self._poll_lbl.config(text=f"every {poll_rate}s")
         self._update_labels()
 
@@ -1297,19 +1503,13 @@ class WorkflowRow:
                     pass
 
         self._info_lbl.config(text=status_txt)
-        if s.last_check:
-            self._dot.config(
-                text=STATUS_SYMBOL.get(s.status, "●"),
-            )
 
-        # PR-mode labels
+        # PR-mode labels — section header already shows workflow name,
+        # so hide name_lbl and show just PR# + branch as the row title.
+        has_badges = False
         if s.head_branch:
-            self._sep_lbl.pack(side=tk.LEFT)
-            if s.branch_prefix:
-                self._prefix_lbl.config(text=s.branch_prefix)
-                self._prefix_lbl.pack(side=tk.LEFT, padx=(2, 4))
-            else:
-                self._prefix_lbl.pack_forget()
+            self._name_lbl.pack_forget()
+            self._sep_lbl.pack_forget()
 
             branch_text = s.branch_short or s.head_branch
             if s.pr_number:
@@ -1317,15 +1517,31 @@ class WorkflowRow:
             self._branch_lbl.config(text=branch_text)
             self._branch_lbl.pack(side=tk.LEFT, padx=(0, 4))
 
+            # Badges on their own line
+            if s.branch_prefix:
+                self._prefix_lbl.config(text=s.branch_prefix)
+                self._prefix_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                has_badges = True
+            else:
+                self._prefix_lbl.pack_forget()
+
             if s.is_draft:
-                self._draft_lbl.pack(side=tk.LEFT, padx=(2, 0))
+                self._draft_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                has_badges = True
             else:
                 self._draft_lbl.pack_forget()
+
+            if has_badges:
+                self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
+            else:
+                self._badge_row.pack_forget()
         else:
+            self._name_lbl.pack(side=tk.LEFT)
             self._sep_lbl.pack_forget()
-            self._prefix_lbl.pack_forget()
             self._branch_lbl.pack_forget()
+            self._prefix_lbl.pack_forget()
             self._draft_lbl.pack_forget()
+            self._badge_row.pack_forget()
 
 
 # ---------------------------------------------------------------------------
@@ -1399,20 +1615,24 @@ class UpdateChecker:
 
     @staticmethod
     def check() -> Optional[str]:
-        """Returns the new commit short-hash if an update is available, None otherwise."""
+        """Returns the new commit short-hash if an update is available, None otherwise.
+
+        Skipped when running as a frozen .exe (no git repo available).
+        """
+        if getattr(sys, "frozen", False):
+            return None
         try:
-            app_dir = Path(__file__).parent
             subprocess.run(
                 ["git", "fetch", "origin", "main", "--quiet"],
-                cwd=app_dir, timeout=15, capture_output=True,
+                cwd=_APP_DIR, timeout=15, capture_output=True,
             )
             local = subprocess.run(
                 ["git", "rev-parse", "HEAD"],
-                cwd=app_dir, capture_output=True, text=True,
+                cwd=_APP_DIR, capture_output=True, text=True,
             ).stdout.strip()
             remote = subprocess.run(
                 ["git", "rev-parse", "origin/main"],
-                cwd=app_dir, capture_output=True, text=True,
+                cwd=_APP_DIR, capture_output=True, text=True,
             ).stdout.strip()
             if local and remote and local != remote:
                 return remote[:7]
@@ -1423,18 +1643,17 @@ class UpdateChecker:
     @staticmethod
     def apply_update() -> tuple[bool, str]:
         """Pull latest and install deps. Returns (success, message)."""
-        app_dir = Path(__file__).parent
         try:
             result = subprocess.run(
                 ["git", "pull", "origin", "main"],
-                cwd=app_dir, capture_output=True, text=True, timeout=30,
+                cwd=_APP_DIR, capture_output=True, text=True, timeout=30,
             )
             if result.returncode != 0:
                 return False, result.stderr.strip() or "git pull failed"
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-r",
-                 str(app_dir / "requirements.txt"), "--quiet"],
-                cwd=app_dir, capture_output=True, timeout=60,
+                 str(_APP_DIR / "requirements.txt"), "--quiet"],
+                cwd=_APP_DIR, capture_output=True, timeout=60,
             )
             return True, "Update complete"
         except Exception as exc:
@@ -1594,14 +1813,24 @@ class MainWindow:
 
         self._root = tk.Tk()
         self._root.title(APP_NAME)
+        _generate_app_ico()
         if APP_ICO.exists():
             self._root.iconbitmap(str(APP_ICO))
+        # Also set via iconphoto for taskbar/alt-tab on Windows
+        try:
+            self._app_icon_photos = [
+                ImageTk.PhotoImage(_make_base_icon(s)) for s in (256, 64, 48, 32, 16)
+            ]
+            self._root.wm_iconphoto(True, *self._app_icon_photos)
+        except Exception:
+            pass
         self._root.configure(bg=BG_DARK)
         self._root.resizable(True, True)
         self._root.geometry("560x420")
         self._root.minsize(400, 200)
         self._restore_window_state()
 
+        _init_status_icons()
         self._build_ui()
         self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
         self._root.bind("<Unmap>", self._on_unmap)
@@ -1614,29 +1843,43 @@ class MainWindow:
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
+        # Dark ttk scrollbar style
+        style = ttk.Style()
+        style.theme_use("clam")
+        style.configure("Dark.Vertical.TScrollbar",
+                        background=BG_ROW, troughcolor=BG_DARK,
+                        bordercolor=BG_DARK, arrowcolor=FG_MUTED,
+                        lightcolor=BG_DARK, darkcolor=BG_DARK)
+        style.map("Dark.Vertical.TScrollbar",
+                  background=[("active", FG_MUTED), ("!active", BG_ROW)])
+
         # Title bar area
-        header = tk.Frame(self._root, bg=BG_DARK, height=48)
+        header = tk.Frame(self._root, bg=BG_DARK, height=46)
         header.pack(fill=tk.X)
         header.pack_propagate(False)
         tk.Label(
-            header, text=APP_NAME, font=("Segoe UI", 13, "bold"),
+            header, text=APP_NAME, font=("Segoe UI", 12),
             bg=BG_DARK, fg=FG_TEXT,
-        ).pack(side=tk.LEFT, padx=14, pady=10)
+        ).pack(side=tk.LEFT, padx=16, pady=10)
+
+        # Thin warm separator line under header
+        tk.Frame(self._root, bg="#44403C", height=1).pack(fill=tk.X)
 
         # Column headers
         hdr = tk.Frame(self._root, bg=BG_DARK)
-        hdr.pack(fill=tk.X, padx=10, pady=(0, 2))
-        tk.Label(hdr, text="  Status / Workflow", font=("Segoe UI", 8, "bold"),
+        hdr.pack(fill=tk.X, padx=14, pady=(6, 2))
+        tk.Label(hdr, text="STATUS / WORKFLOW", font=("Segoe UI", 7, "bold"),
                  bg=BG_DARK, fg=FG_MUTED, anchor="w").pack(side=tk.LEFT, expand=True, fill=tk.X)
-        tk.Label(hdr, text="Poll rate", font=("Segoe UI", 8, "bold"),
+        tk.Label(hdr, text="POLL", font=("Segoe UI", 7, "bold"),
                  bg=BG_DARK, fg=FG_MUTED, width=12, anchor="e").pack(side=tk.RIGHT)
 
         # Scrollable workflow list
         container = tk.Frame(self._root, bg=BG_DARK)
-        container.pack(fill=tk.BOTH, expand=True, padx=6)
+        container.pack(fill=tk.BOTH, expand=True, padx=8)
 
         canvas = tk.Canvas(container, bg=BG_DARK, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview)
+        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview,
+                                  style="Dark.Vertical.TScrollbar")
         canvas.configure(yscrollcommand=scrollbar.set)
 
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -1645,12 +1888,15 @@ class MainWindow:
         self._list_frame = tk.Frame(canvas, bg=BG_DARK)
         self._canvas_window = canvas.create_window((0, 0), window=self._list_frame, anchor="nw")
 
-        def _on_resize(e):
+        def _on_canvas_configure(e):
             canvas.itemconfig(self._canvas_window, width=e.width)
-        canvas.bind("<Configure>", _on_resize)
+        canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_frame_configure(_e):
-            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Use after_idle so geometry is fully resolved before updating scroll region
+            canvas.after_idle(lambda: canvas.configure(
+                scrollregion=(0, 0, self._list_frame.winfo_reqwidth(),
+                              self._list_frame.winfo_reqheight())))
         self._list_frame.bind("<Configure>", _on_frame_configure)
 
         def _on_mousewheel(e):
@@ -1663,18 +1909,21 @@ class MainWindow:
         footer = tk.Frame(self._root, bg=ACCENT)
         footer.pack(fill=tk.X, side=tk.BOTTOM)
 
+        # Thin separator above footer
+        tk.Frame(footer, bg="#44403C", height=1).pack(fill=tk.X)
+
         # Row 1: config hint + open button
         footer_row1 = tk.Frame(footer, bg=ACCENT)
-        footer_row1.pack(fill=tk.X, padx=10, pady=(6, 2))
+        footer_row1.pack(fill=tk.X, padx=14, pady=(8, 2))
 
         tk.Label(
             footer_row1,
-            text="Edit config.yaml to add/change workflows. The app reloads it automatically.",
+            text="Edit config.yaml to add/change workflows.",
             font=("Segoe UI", 8), bg=ACCENT, fg=FG_MUTED,
         ).pack(side=tk.LEFT)
 
         open_btn = tk.Label(
-            footer_row1, text="Open config ↗", font=("Segoe UI", 8, "underline"),
+            footer_row1, text="Open config ↗", font=("Segoe UI", 8, "bold"),
             bg=ACCENT, fg=FG_LINK, cursor="hand2",
         )
         open_btn.pack(side=tk.RIGHT)
@@ -1682,7 +1931,7 @@ class MainWindow:
 
         # Row 2: startup checkbox (Windows only)
         footer_row2 = tk.Frame(footer, bg=ACCENT)
-        footer_row2.pack(fill=tk.X, padx=10, pady=(0, 6))
+        footer_row2.pack(fill=tk.X, padx=14, pady=(0, 8))
 
         if IS_WINDOWS:
             self._startup_var = tk.BooleanVar(value=StartupManager.is_enabled())
@@ -1722,12 +1971,12 @@ class MainWindow:
         self._sections.append(section)
 
         hdr = tk.Frame(section, bg=BG_DARK)
-        hdr.pack(fill=tk.X, padx=10, pady=(8, 2))
-        tk.Label(hdr, text=title, font=("Segoe UI", 8, "bold"),
-                 bg=BG_DARK, fg=FG_MUTED, anchor="w").pack(side=tk.LEFT)
-        # Horizontal rule
-        sep = tk.Frame(hdr, bg=ACCENT, height=1)
-        sep.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0), pady=1)
+        hdr.pack(fill=tk.X, padx=12, pady=(10, 4))
+        tk.Label(hdr, text=title, font=("Segoe UI", 9, "bold"),
+                 bg=BG_DARK, fg=FG_LINK, anchor="w").pack(side=tk.LEFT)
+        # Horizontal rule — warm tone
+        sep = tk.Frame(hdr, bg="#44403C", height=1)
+        sep.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0), pady=1)
 
         content = tk.Frame(section, bg=BG_DARK)
         content.pack(fill=tk.X)
