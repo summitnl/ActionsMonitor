@@ -155,7 +155,9 @@ For the exe, download the latest `ActionsMonitor.exe` and replace the old one.
 
 ### 2026-04-13
 
-- **PR title display** — PR-mode rows now show the pull request title below the PR number and branch name, fetched alongside draft status detection.
+- **Refresh button** — click **Refresh** in the header to trigger an immediate re-poll of all workflows without waiting for the next interval.
+- **PR review status** — PR-mode rows show a colour-coded review badge: green APPROVED, red CHANGES REQUESTED, or amber REVIEW PENDING. Updated each poll cycle.
+- **PR title display** — PR-mode rows now show the pull request title as the main clickable title (opens the PR), with #number + branch as a subtitle (opens the build run).
 - **Jira ticket links** — when `jira_base_url` is configured, Jira ticket IDs (e.g. `EDU-1234`) are extracted from branch names and shown as clickable badges on PR and actor-mode rows. Clicking opens the ticket in Jira.
 - **Fix PR mode false success with multiple workflows** — PR-mode entries now support an `extra_workflows` list that aggregates status across multiple workflow files. The row shows the worst-of status (failure > running > queued > success), so integration tests still running or failing are no longer hidden behind a passing primary workflow. Notifications fire on aggregate status transitions.
 - **Collapsible categories** — click any section header to collapse/expand its rows. Collapse state persists across restarts via `state.json`. Collapsed sections still contribute to the tray icon status.

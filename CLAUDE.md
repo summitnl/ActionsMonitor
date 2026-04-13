@@ -46,6 +46,8 @@ Everything lives in `src/main.py` — single-file application by design.
 
 The UI drains the queue via `root.after(500, _drain_queue)` — this is the only safe way to propagate poller results to tkinter widgets. Never call widget methods from poller threads directly.
 
+Pollers sleep between polls using a deadline loop that checks both `_stop_evt` and `_poll_now` events. The header **Refresh** button calls `_refresh_all()` which sets `_poll_now` on all pollers, waking them to re-poll immediately.
+
 ### Data flow
 
 ```
@@ -63,6 +65,7 @@ PRWorkflowPoller._poll()      # pr mode
   → aggregate status (worst wins)  # failure > running > queued > success
   → pick representative run     # highest-priority status run for display
   → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title
+  → _fetch_pr_review_status()   # GET /pulls/{n}/reviews → approved/changes_requested/pending
   → extract_jira_key()          # regex on branch name
   → StatusEvent(sub_key=branch) → queue.Queue
   → MainWindow creates/updates/removes WorkflowRows dynamically

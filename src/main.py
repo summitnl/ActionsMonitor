@@ -454,6 +454,7 @@ class WorkflowState:
     pr_title:      Optional[str] = None
     pr_url:        Optional[str] = None
     is_draft:      bool = False
+    review_status: Optional[str] = None   # "approved" | "changes_requested" | "pending" | None
     jira_key:      Optional[str] = None
 
 
@@ -653,6 +654,7 @@ class WorkflowPoller(threading.Thread):
         self.config_mgr  = config_mgr
         self.event_queue = event_queue
         self._stop_evt   = threading.Event()
+        self._poll_now   = threading.Event()
 
         url = cfg_entry.get("url", "")
         try:
@@ -678,11 +680,22 @@ class WorkflowPoller(threading.Thread):
     def stop(self):
         self._stop_evt.set()
 
+    def trigger_poll(self):
+        """Wake the poller to re-poll immediately."""
+        self._poll_now.set()
+
     def run(self):
         while not self._stop_evt.is_set():
             self._poll()
+            self._poll_now.clear()
             poll_rate = int(self.cfg_entry.get("polling_rate", POLL_DEFAULT))
-            self._stop_evt.wait(poll_rate)
+            # Wake early if stop or poll_now is signalled
+            deadline = time.monotonic() + poll_rate
+            while not self._stop_evt.is_set() and not self._poll_now.is_set():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                self._stop_evt.wait(min(remaining, 1.0))
 
     def _poll(self):
         cfg      = self.config_mgr.get()
@@ -969,6 +982,7 @@ class PRWorkflowPoller(WorkflowPoller):
                         state.pr_title = self._pr_cache[pr_num].get("title")
                     if pr_num:
                         state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
+                        state.review_status = self._fetch_pr_review_status(pr_num, token)
                     break
 
             # Jira ticket key from branch name
@@ -1029,6 +1043,40 @@ class PRWorkflowPoller(WorkflowPoller):
             return is_draft
         except Exception:
             return False
+
+    def _fetch_pr_review_status(self, pr_number: int, token: str) -> Optional[str]:
+        """Fetch the aggregate review status for a PR.
+        Returns 'approved', 'changes_requested', 'pending', or None."""
+        try:
+            url = (
+                f"https://api.github.com/repos/{self.owner}/{self.repo}"
+                f"/pulls/{pr_number}/reviews"
+            )
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            reviews = resp.json()
+
+            # Keep only the latest review per reviewer (ignore COMMENTED/PENDING)
+            latest: dict[str, str] = {}
+            for r in reviews:
+                user = r.get("user", {}).get("login", "")
+                state = r.get("state", "")
+                if state in ("APPROVED", "CHANGES_REQUESTED"):
+                    latest[user] = state
+
+            if not latest:
+                return "pending"
+            if "CHANGES_REQUESTED" in latest.values():
+                return "changes_requested"
+            return "approved"
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -1553,6 +1601,12 @@ class WorkflowRow:
         )
         self._jira_lbl.bind("<Button-1>", self._open_jira)
 
+        # Review status badge (APPROVED / CHANGES REQUESTED / REVIEW PENDING)
+        self._review_lbl = tk.Label(
+            self._badge_row, text="", font=("Segoe UI", 7),
+            anchor="w", padx=3, pady=0,
+        )
+
         # PR title (becomes the main title for PR-mode rows, opens PR page)
         self._pr_title_lbl = tk.Label(
             centre, text="", font=("Segoe UI", 9),
@@ -1653,6 +1707,21 @@ class WorkflowRow:
             else:
                 self._jira_lbl.pack_forget()
 
+            if s.review_status:
+                _review_cfg = {
+                    "approved":          ("APPROVED",          "#1C3A2A", "#4ADE80"),
+                    "changes_requested": ("CHANGES REQUESTED", "#3A1C1C", "#F87171"),
+                    "pending":           ("REVIEW PENDING",    "#3D3530", "#FBBF24"),
+                }
+                text, bg_col, fg_col = _review_cfg.get(
+                    s.review_status, ("REVIEW PENDING", "#3D3530", "#FBBF24")
+                )
+                self._review_lbl.config(text=text, bg=bg_col, fg=fg_col)
+                self._review_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                has_badges = True
+            else:
+                self._review_lbl.pack_forget()
+
             if has_badges:
                 self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
             else:
@@ -1664,6 +1733,7 @@ class WorkflowRow:
             self._prefix_lbl.pack_forget()
             self._draft_lbl.pack_forget()
             self._jira_lbl.pack_forget()
+            self._review_lbl.pack_forget()
             self._pr_title_lbl.pack_forget()
             self._badge_row.pack_forget()
 
@@ -1990,6 +2060,13 @@ class MainWindow:
             bg=BG_DARK, fg=FG_TEXT,
         ).pack(side=tk.LEFT, padx=16, pady=10)
 
+        refresh_btn = tk.Label(
+            header, text="Refresh", font=("Segoe UI", 9),
+            bg="#44403C", fg=FG_TEXT, padx=12, pady=4, cursor="hand2",
+        )
+        refresh_btn.pack(side=tk.RIGHT, padx=(0, 16), pady=8)
+        refresh_btn.bind("<Button-1>", lambda _: self._refresh_all())
+
         # Thin warm separator line under header
         tk.Frame(self._root, bg="#44403C", height=1).pack(fill=tk.X)
 
@@ -2240,6 +2317,11 @@ class MainWindow:
         for p in self._pollers.values():
             p.stop()
         self._pollers.clear()
+
+    def _refresh_all(self):
+        """Trigger an immediate re-poll of all workflows."""
+        for p in self._pollers.values():
+            p.trigger_poll()
 
     # ------------------------------------------------------------------
     # Queue drain (called periodically on main thread)
