@@ -114,6 +114,9 @@ workflows:
   #   polling_rate: 45
   #   max_prs: 5                  # Max PR rows to show (default: 5)
   #   pr_stale_after: 300         # Seconds before removing a stale PR row (default: 300)
+  #   extra_workflows:            # Optional: additional workflow files to aggregate status from
+  #     - integration-tests.yml   # Row shows worst-of status across all workflows
+  #     - e2e-tests.yml           # (failure > running > queued > success)
   #
   # Example with a real URL (PR mode):
   # - url: https://github.com/summitnl/HippoCampus/actions/workflows/acceptance-pr.yml
@@ -122,6 +125,9 @@ workflows:
   #   polling_rate: 45
   #   max_prs: 5
   #   pr_stale_after: 300
+  #   extra_workflows:
+  #     - acceptance-pr-e2e-integrationtests.yml
+  #     - acceptance-pr-lint.yml
 
   # ---------------------------------------------------------------------------
   # Example: Actor mode — all your recent workflow runs across a repo

@@ -781,9 +781,11 @@ class PRWorkflowPoller(WorkflowPoller):
         super().__init__(wid, cfg_entry, config_mgr, event_queue)
         self._max_prs = int(cfg_entry.get("max_prs", 5))
         self._stale_after = int(cfg_entry.get("pr_stale_after", 300))
+        # Extra workflow files to aggregate status from
+        self._extra_wf_files: list[str] = list(cfg_entry.get("extra_workflows", []))
         # Per-branch tracking
-        self._prev_run_ids:    dict[str, int] = {}
-        self._prev_statuses:   dict[str, str] = {}
+        self._prev_run_ids:    dict[str, set[int]] = {}   # set of run IDs across all workflows
+        self._prev_statuses:   dict[str, str] = {}        # aggregate status string
         self._prev_conclusions: dict[str, Optional[str]] = {}
         self._last_seen:       dict[str, datetime] = {}
         # PR detail cache: pr_number → {draft: bool}
@@ -817,42 +819,103 @@ class PRWorkflowPoller(WorkflowPoller):
             self.event_queue.put(StatusEvent(self.wid, state))
             return
 
-        try:
-            runs = fetch_pr_runs(
-                self.owner, self.repo, self.wf_file, username, token,
-                per_page=self._max_prs * 2,
-            )
-        except requests.HTTPError as exc:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-            state.status = ST_UNKNOWN
-            state.error = f"HTTP {exc.response.status_code}"
-            self.event_queue.put(StatusEvent(self.wid, state))
-            return
-        except Exception as exc:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-            state.status = ST_UNKNOWN
-            state.error = str(exc)
-            self.event_queue.put(StatusEvent(self.wid, state))
-            return
+        # Fetch runs from primary workflow + any extra workflows
+        all_wf_files = [self.wf_file] + self._extra_wf_files
+        all_runs: list[dict] = []
+        for wf_file in all_wf_files:
+            try:
+                runs = fetch_pr_runs(
+                    self.owner, self.repo, wf_file, username, token,
+                    per_page=self._max_prs * 2,
+                )
+                all_runs.extend(runs)
+            except requests.HTTPError as exc:
+                if not all_runs and wf_file == self.wf_file:
+                    # Primary workflow failed — report error
+                    state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+                    state.status = ST_UNKNOWN
+                    state.error = f"HTTP {exc.response.status_code}"
+                    self.event_queue.put(StatusEvent(self.wid, state))
+                    return
+                # Extra workflow failed — skip silently
+            except Exception as exc:
+                if not all_runs and wf_file == self.wf_file:
+                    state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
+                    state.status = ST_UNKNOWN
+                    state.error = str(exc)
+                    self.event_queue.put(StatusEvent(self.wid, state))
+                    return
 
-        # Group by head_branch, take latest per branch
-        by_branch: dict[str, dict] = {}
-        for run in runs:
+        # Group all runs by head_branch, keeping latest per workflow file
+        by_branch: dict[str, list[dict]] = {}
+        seen_wf_per_branch: dict[str, set[str]] = {}
+        for run in all_runs:
             hb = run.get("head_branch", "")
-            if hb and hb not in by_branch:
-                by_branch[hb] = run
+            if not hb:
+                continue
+            wf_path = run.get("path", "")  # e.g. ".github/workflows/acceptance-pr.yml"
+            if hb not in by_branch:
+                by_branch[hb] = []
+                seen_wf_per_branch[hb] = set()
+            # Keep only the latest run per workflow file per branch
+            if wf_path not in seen_wf_per_branch[hb]:
+                seen_wf_per_branch[hb].add(wf_path)
+                by_branch[hb].append(run)
 
-        # Limit to max_prs
-        active_branches = dict(list(by_branch.items())[:self._max_prs])
+        # Limit to max_prs (order by most recent run across all workflows)
+        branch_order = sorted(
+            by_branch.keys(),
+            key=lambda b: max(
+                (r.get("run_started_at") or r.get("created_at") or "" for r in by_branch[b]),
+                default="",
+            ),
+            reverse=True,
+        )
+        active_branches = {b: by_branch[b] for b in branch_order[:self._max_prs]}
         now = datetime.now()
 
-        for branch_name, run in active_branches.items():
+        for branch_name, branch_runs in active_branches.items():
             self._last_seen[branch_name] = now
 
-            run_id     = run.get("id")
-            api_status = run.get("status")
-            conclusion = run.get("conclusion")
+            # Determine per-run statuses and pick the aggregate + representative run
+            run_statuses: list[str] = []
+            representative_run: Optional[dict] = None
+            rep_priority = -1
 
+            _REPR_PRIORITY = {ST_FAILURE: 4, ST_RUNNING: 3, ST_QUEUED: 2, ST_SUCCESS: 1,
+                              ST_UNKNOWN: 0, ST_CANCELLED: 0, ST_SKIPPED: 0}
+            for run in branch_runs:
+                api_status = run.get("status")
+                conclusion = run.get("conclusion")
+                if api_status == "completed":
+                    st = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
+                elif api_status == "in_progress":
+                    st = ST_RUNNING
+                elif api_status == "queued":
+                    st = ST_QUEUED
+                else:
+                    st = ST_UNKNOWN
+                run_statuses.append(st)
+
+                # Pick representative run: failure > running > queued > success > unknown
+                p = _REPR_PRIORITY.get(st, 0)
+                if p > rep_priority:
+                    rep_priority = p
+                    representative_run = run
+
+            # Fall back to first run if none matched priority
+            if representative_run is None:
+                representative_run = branch_runs[0]
+
+            # Aggregate status (worst wins)
+            status_set = set(run_statuses)
+            if ST_FAILURE  in status_set: agg_status = ST_FAILURE
+            elif ST_RUNNING  in status_set: agg_status = ST_RUNNING
+            elif ST_QUEUED   in status_set: agg_status = ST_QUEUED
+            elif ST_SUCCESS  in status_set: agg_status = ST_SUCCESS
+            else:                           agg_status = ST_UNKNOWN
+
+            run = representative_run
             state = WorkflowState(
                 name=self.name_display,
                 url=self.cfg_entry.get("url", ""),
@@ -860,56 +923,47 @@ class PRWorkflowPoller(WorkflowPoller):
                 head_branch=branch_name,
             )
             state.last_check = now
-
-            if api_status == "completed":
-                state.status = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
-            elif api_status == "in_progress":
-                state.status = ST_RUNNING
-            elif api_status == "queued":
-                state.status = ST_QUEUED
-            else:
-                state.status = ST_UNKNOWN
-
-            state.run_id     = run_id
+            state.status     = agg_status
+            state.run_id     = run.get("id")
             state.run_url    = run.get("html_url")
             state.run_number = run.get("run_number")
             state.started_at = run.get("run_started_at") or run.get("created_at")
-            state.conclusion = conclusion
+            state.conclusion = run.get("conclusion")
 
             # Parse branch prefix
             prefix, short = parse_branch_prefix(branch_name)
             state.branch_prefix = prefix
             state.branch_short  = short
 
-            # Extract PR number and draft status
-            prs = run.get("pull_requests") or []
-            if prs:
-                pr_num = prs[0].get("number")
-                state.pr_number = pr_num
-                if pr_num and pr_num not in self._pr_cache:
-                    state.is_draft = self._fetch_pr_draft(pr_num, token)
-                elif pr_num:
-                    state.is_draft = self._pr_cache[pr_num].get("draft", False)
+            # Extract PR number and draft status (from any run that has it)
+            for r in branch_runs:
+                prs = r.get("pull_requests") or []
+                if prs:
+                    pr_num = prs[0].get("number")
+                    state.pr_number = pr_num
+                    if pr_num and pr_num not in self._pr_cache:
+                        state.is_draft = self._fetch_pr_draft(pr_num, token)
+                    elif pr_num:
+                        state.is_draft = self._pr_cache[pr_num].get("draft", False)
+                    break
 
-            # Determine notification
+            # Determine notification based on aggregate status transitions
             notif_type: Optional[str] = None
-            prev_rid = self._prev_run_ids.get(branch_name)
-            prev_st  = self._prev_statuses.get(branch_name)
-            if prev_rid is not None and run_id != prev_rid:
+            cur_run_ids = {r.get("id") for r in branch_runs}
+            prev_rids   = self._prev_run_ids.get(branch_name, set())
+            prev_agg    = self._prev_statuses.get(branch_name)
+
+            if prev_rids and cur_run_ids != prev_rids and not cur_run_ids.issubset(prev_rids):
                 notif_type = "new_run"
-            elif (
-                run_id == prev_rid
-                and api_status == "completed"
-                and prev_st != "completed"
-            ):
-                if state.status == ST_SUCCESS:
+            elif prev_agg and prev_agg != agg_status:
+                if agg_status == ST_SUCCESS:
                     notif_type = "success"
-                elif state.status == ST_FAILURE:
+                elif agg_status == ST_FAILURE:
                     notif_type = "failure"
 
-            self._prev_run_ids[branch_name]     = run_id
-            self._prev_statuses[branch_name]    = api_status
-            self._prev_conclusions[branch_name] = conclusion
+            self._prev_run_ids[branch_name]     = cur_run_ids
+            self._prev_statuses[branch_name]    = agg_status
+            self._prev_conclusions[branch_name] = run.get("conclusion")
 
             self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=branch_name))
 

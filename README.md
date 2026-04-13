@@ -29,8 +29,6 @@ install.bat
 
 That's it. The script installs all Python dependencies and creates a `config.yaml` from the template. The app launches automatically when done.
 
-To start it manually afterwards, double-click `run.bat`.
-
 ### Building a standalone `.exe`
 
 ```
@@ -152,6 +150,10 @@ pip install -r requirements.txt
 ```
 
 ## Changelog
+
+### 2026-04-13
+
+- **Fix PR mode false success with multiple workflows** — PR-mode entries now support an `extra_workflows` list that aggregates status across multiple workflow files. The row shows the worst-of status (failure > running > queued > success), so integration tests still running or failing are no longer hidden behind a passing primary workflow. Notifications fire on aggregate status transitions.
 
 ### 2026-04-10
 

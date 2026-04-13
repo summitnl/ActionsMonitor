@@ -13,8 +13,6 @@ python main.py
 
 # Run without a console window (Windows)
 pythonw main.py
-# or double-click:
-run.bat
 
 # Build a standalone .exe (icon embedded, no Python needed to run)
 build.bat          # produces dist/ActionsMonitor.exe
@@ -60,8 +58,10 @@ WorkflowPoller._poll()        # branch mode (default)
 
 PRWorkflowPoller._poll()      # pr mode
   → fetch_github_username()     # cached GET /user
-  → fetch_pr_runs()             # runs filtered by actor+event
-  → group by head_branch        # one StatusEvent per branch
+  → fetch_pr_runs() × N         # primary + extra_workflows
+  → group by head_branch        # latest run per workflow file per branch
+  → aggregate status (worst wins)  # failure > running > queued > success
+  → pick representative run     # highest-priority status run for display
   → StatusEvent(sub_key=branch) → queue.Queue
   → MainWindow creates/updates/removes WorkflowRows dynamically
 
