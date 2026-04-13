@@ -89,10 +89,11 @@ APP_VERSION = "1.0"
 
 # When frozen by PyInstaller, __file__ points to a temp dir.
 # Use the executable's directory instead so config/state live next to the .exe.
+# When running from source in src/, go up one level to the project root.
 if getattr(sys, "frozen", False):
     _APP_DIR = Path(sys.executable).parent
 else:
-    _APP_DIR = Path(__file__).parent
+    _APP_DIR = Path(__file__).resolve().parent.parent
 
 CONFIG_FILE = _APP_DIR / "config.yaml"
 STATE_FILE  = _APP_DIR / "state.json"
@@ -1706,7 +1707,7 @@ class UpdateChecker:
                 return False, result.stderr.strip() or "git pull failed"
             subprocess.run(
                 [sys.executable, "-m", "pip", "install", "-r",
-                 str(_APP_DIR / "requirements.txt"), "--quiet"],
+                 str(_APP_DIR / "src" / "requirements.txt"), "--quiet"],
                 cwd=_APP_DIR, capture_output=True, timeout=60,
             )
             return True, "Update complete"

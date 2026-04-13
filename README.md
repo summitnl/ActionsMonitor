@@ -24,7 +24,7 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 ## Installation
 
 ```
-dev-install.bat
+src\dev-install.bat
 ```
 
 That's it. The script installs all Python dependencies and creates a `config.yaml` from the template. The app launches automatically when done.
@@ -32,10 +32,10 @@ That's it. The script installs all Python dependencies and creates a `config.yam
 ### Building a standalone `.exe`
 
 ```
-build.bat
+src\build.bat
 ```
 
-Produces `dist\ActionsMonitor.exe` — a single file with the icon embedded. Place your `config.yaml` next to it.
+Produces `ActionsMonitor.exe` in the project root — a single file with the icon embedded. Place your `config.yaml` next to it.
 
 ## Configuration
 
@@ -133,7 +133,7 @@ The tray icon follows the same logic, showing the worst state across all configu
 ## Uninstall
 
 ```
-dev-uninstall.bat
+src\dev-uninstall.bat
 ```
 
 Removes the startup registry entry and uninstalls the Python packages. Delete the folder afterwards.
@@ -146,7 +146,7 @@ To update manually:
 
 ```bash
 git pull
-pip install -r requirements.txt
+pip install -r src/requirements.txt
 ```
 
 ## Changelog

@@ -6,27 +6,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Install dependencies (one-time)
-pip install -r requirements.txt
+pip install -r src/requirements.txt
 
 # Run (with console, useful for debug output)
-python main.py
+python src/main.py
 
 # Run without a console window (Windows)
-pythonw main.py
+pythonw src/main.py
 
 # Build a standalone .exe (icon embedded, no Python needed to run)
-build.bat          # produces dist/ActionsMonitor.exe
+src\build.bat          # produces ActionsMonitor.exe in the project root
 ```
 
-When running as a `.exe`, place `config.yaml` next to the executable.
+When running as a `.exe`, place `config.yaml` next to the executable (project root).
 
 ## Architecture
 
-Everything lives in `main.py` — single-file application by design.
+Everything lives in `src/main.py` — single-file application by design.
 
 ### File paths and frozen mode
 
-`_APP_DIR` resolves to either `Path(__file__).parent` (source) or `Path(sys.executable).parent` (PyInstaller `.exe`). All user-facing files use this:
+`_APP_DIR` resolves to the project root: `Path(__file__).resolve().parent.parent` (source in `src/`) or `Path(sys.executable).parent` (PyInstaller `.exe`). All user-facing files use this:
 
 | File | Purpose | Gitignored |
 |---|---|---|
@@ -176,4 +176,4 @@ When adding features, always add a dated changelog entry to the `## Changelog` s
 
 ### Building
 
-`build.bat` runs PyInstaller to produce a single-file `.exe` in `dist/`. Build artifacts (`build/`, `dist/`, `*.spec`) are gitignored.
+`src\build.bat` runs PyInstaller to produce `ActionsMonitor.exe` in the project root. Build artifacts (`build/`, `*.spec`, `*.exe`) are gitignored.

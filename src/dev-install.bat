@@ -6,6 +6,8 @@ echo   Actions Monitor — Install
 echo ========================================
 echo.
 
+set "ROOT=%~dp0.."
+
 :: Check Python
 python --version >nul 2>&1
 if errorlevel 1 (
@@ -29,8 +31,8 @@ if errorlevel 1 (
 
 echo.
 echo [2/3] Setting up config...
-if not exist "%~dp0config.yaml" (
-    copy "%~dp0config.template.yaml" "%~dp0config.yaml" >nul
+if not exist "%ROOT%\config.yaml" (
+    copy "%ROOT%\config.template.yaml" "%ROOT%\config.yaml" >nul
     echo        Created config.yaml from template. Add your workflows and GitHub token in that file.
 ) else (
     echo        config.yaml already exists, skipping.
@@ -43,4 +45,3 @@ echo You can enable "Start with Windows" inside the app itself.
 echo.
 echo Starting Actions Monitor...
 start "" pythonw "%~dp0main.py"
-
