@@ -7,8 +7,8 @@ echo Generating app icon...
 python -c "from main import _generate_app_ico; _generate_app_ico()"
 
 echo Building .exe...
-python -m PyInstaller --onefile --noconsole --name "ActionsMonitor" --icon=app.ico --add-data "config.template.yaml;." main.py
+python -m PyInstaller --onefile --noconsole --name "ActionsMonitor" --icon=app.ico --add-data "config.template.yaml;." --distpath . --workpath build main.py
 
 echo.
-echo Done! Output: dist\ActionsMonitor.exe
+echo Done! Output: ActionsMonitor.exe
 pause

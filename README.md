@@ -24,7 +24,7 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 ## Installation
 
 ```
-install.bat
+dev-install.bat
 ```
 
 That's it. The script installs all Python dependencies and creates a `config.yaml` from the template. The app launches automatically when done.
@@ -133,7 +133,7 @@ The tray icon follows the same logic, showing the worst state across all configu
 ## Uninstall
 
 ```
-uninstall.bat
+dev-uninstall.bat
 ```
 
 Removes the startup registry entry and uninstalls the Python packages. Delete the folder afterwards.
@@ -154,6 +154,7 @@ pip install -r requirements.txt
 ### 2026-04-13
 
 - **Fix PR mode false success with multiple workflows** — PR-mode entries now support an `extra_workflows` list that aggregates status across multiple workflow files. The row shows the worst-of status (failure > running > queued > success), so integration tests still running or failing are no longer hidden behind a passing primary workflow. Notifications fire on aggregate status transitions.
+- **Collapsible categories** — click any section header to collapse/expand its rows. Collapse state persists across restarts via `state.json`. Collapsed sections still contribute to the tray icon status.
 
 ### 2026-04-10
 

@@ -1864,6 +1864,9 @@ class MainWindow:
         self._tray: Optional[TrayManager] = None
         self._sections: list[tk.Frame] = []           # section header+container frames
         self._wid_container: dict[int, tk.Frame] = {} # wid → section content frame
+        self._section_content: dict[str, tk.Frame] = {}    # title → content frame
+        self._section_indicators: dict[str, tk.Label] = {} # title → indicator label
+        self._collapsed: dict[str, bool] = {}              # title → collapsed flag
 
         self._root = tk.Tk()
         self._root.title(APP_NAME)
@@ -1883,6 +1886,7 @@ class MainWindow:
         self._root.geometry("560x420")
         self._root.minsize(400, 200)
         self._restore_window_state()
+        self._restore_collapse_state()
 
         _init_status_icons()
         self._build_ui()
@@ -2019,28 +2023,85 @@ class MainWindow:
     # Sections
     # ------------------------------------------------------------------
     def _create_section(self, title: str) -> tk.Frame:
-        """Create a section header + content frame and return the content frame."""
+        """Create a collapsible section header + content frame and return the content frame."""
         section = tk.Frame(self._list_frame, bg=BG_DARK)
         section.pack(fill=tk.X)
         self._sections.append(section)
 
-        hdr = tk.Frame(section, bg=BG_DARK)
+        is_collapsed = self._collapsed.get(title, False)
+
+        hdr = tk.Frame(section, bg=BG_DARK, cursor="hand2")
         hdr.pack(fill=tk.X, padx=12, pady=(10, 4))
-        tk.Label(hdr, text=title, font=("Segoe UI", 9, "bold"),
-                 bg=BG_DARK, fg=FG_LINK, anchor="w").pack(side=tk.LEFT)
+
+        indicator = tk.Label(hdr, text="▸" if is_collapsed else "▾",
+                             font=("Segoe UI", 9, "bold"),
+                             bg=BG_DARK, fg=FG_LINK, anchor="w")
+        indicator.pack(side=tk.LEFT, padx=(0, 4))
+        self._section_indicators[title] = indicator
+
+        title_lbl = tk.Label(hdr, text=title, font=("Segoe UI", 9, "bold"),
+                             bg=BG_DARK, fg=FG_LINK, anchor="w")
+        title_lbl.pack(side=tk.LEFT)
+
         # Horizontal rule — warm tone
         sep = tk.Frame(hdr, bg="#44403C", height=1)
         sep.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0), pady=1)
 
         content = tk.Frame(section, bg=BG_DARK)
-        content.pack(fill=tk.X)
+        if not is_collapsed:
+            content.pack(fill=tk.X)
+        self._section_content[title] = content
+
+        # Bind click on all header widgets
+        def toggle(_e=None, t=title):
+            self._toggle_section(t)
+        for widget in (hdr, indicator, title_lbl, sep):
+            widget.bind("<Button-1>", toggle)
+
         return content
+
+    def _toggle_section(self, title: str):
+        """Toggle collapse/expand for a section."""
+        is_collapsed = not self._collapsed.get(title, False)
+        self._collapsed[title] = is_collapsed
+
+        content = self._section_content.get(title)
+        indicator = self._section_indicators.get(title)
+
+        if content:
+            if is_collapsed:
+                content.pack_forget()
+            else:
+                content.pack(fill=tk.X)
+        if indicator:
+            indicator.config(text="▸" if is_collapsed else "▾")
+
+        self._save_collapse_state()
+
+    def _save_collapse_state(self):
+        """Persist collapsed sections to state.json."""
+        try:
+            state = {}
+            if STATE_FILE.exists():
+                with open(STATE_FILE, encoding="utf-8") as fh:
+                    state = json.load(fh)
+            collapsed = [t for t, c in self._collapsed.items() if c]
+            if collapsed:
+                state["collapsed_sections"] = collapsed
+            else:
+                state.pop("collapsed_sections", None)
+            with open(STATE_FILE, "w", encoding="utf-8") as fh:
+                json.dump(state, fh, indent=2)
+        except Exception:
+            pass
 
     def _destroy_sections(self):
         for sec in self._sections:
             sec.destroy()
         self._sections.clear()
         self._wid_container.clear()
+        self._section_content.clear()
+        self._section_indicators.clear()
 
     # ------------------------------------------------------------------
     # Pollers
@@ -2207,10 +2268,27 @@ class MainWindow:
                 "width": self._root.winfo_width(),
                 "height": self._root.winfo_height(),
             }
+            collapsed = [t for t, c in self._collapsed.items() if c]
+            if collapsed:
+                state["collapsed_sections"] = collapsed
+            else:
+                state.pop("collapsed_sections", None)
             with open(STATE_FILE, "w", encoding="utf-8") as fh:
                 json.dump(state, fh, indent=2)
         except Exception as exc:
             print(f"[State] Save error: {exc}")
+
+    def _restore_collapse_state(self):
+        """Load collapsed section titles from state.json."""
+        try:
+            if not STATE_FILE.exists():
+                return
+            with open(STATE_FILE, encoding="utf-8") as fh:
+                state = json.load(fh)
+            for title in state.get("collapsed_sections", []):
+                self._collapsed[title] = True
+        except Exception:
+            pass
 
     def _restore_window_state(self):
         """Restore window geometry from state.json, clamped to visible monitors."""
