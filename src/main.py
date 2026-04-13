@@ -9,6 +9,7 @@ import ctypes
 import ctypes.wintypes
 import json
 import os
+import shutil
 import sys
 import platform
 import threading
@@ -211,8 +212,13 @@ class ConfigManager:
             return self.data
 
     def _write_default(self):
-        with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
-            yaml.dump(DEFAULT_CONFIG, fh, default_flow_style=False)
+        # Copy the commented template if available, otherwise write bare defaults
+        template = _APP_DIR / "config.template.yaml"
+        if template.exists():
+            shutil.copy2(template, CONFIG_FILE)
+        else:
+            with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
+                yaml.dump(DEFAULT_CONFIG, fh, default_flow_style=False)
 
     @staticmethod
     def open_in_editor():

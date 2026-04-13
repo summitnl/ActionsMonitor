@@ -22,9 +22,9 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 
 ## Getting started
 
-1. Copy `config.template.yaml` to `config.yaml`
+1. Run `ActionsMonitor.exe` — on first launch it creates `config.yaml` from the template
 2. Add your GitHub token and workflows (see [Configuration](#configuration) below)
-3. Run `ActionsMonitor.exe`
+3. The app hot-reloads the config, no restart needed
 
 ### Development setup
 
