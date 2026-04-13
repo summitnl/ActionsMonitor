@@ -414,6 +414,16 @@ def parse_branch_prefix(branch: str) -> tuple[Optional[str], str]:
     return None, branch
 
 
+# Jira ticket extraction
+_JIRA_KEY_RE = re.compile(r"(?i)\b([A-Z][A-Z0-9]+-\d+)\b")
+
+
+def extract_jira_key(branch: str) -> Optional[str]:
+    """Extract a Jira ticket key (e.g. EDU-1234) from a branch name."""
+    m = _JIRA_KEY_RE.search(branch)
+    return m.group(1).upper() if m else None
+
+
 # ---------------------------------------------------------------------------
 # Workflow state
 # ---------------------------------------------------------------------------
@@ -435,7 +445,10 @@ class WorkflowState:
     branch_prefix: Optional[str] = None
     branch_short:  Optional[str] = None
     pr_number:     Optional[int] = None
+    pr_title:      Optional[str] = None
+    pr_url:        Optional[str] = None
     is_draft:      bool = False
+    jira_key:      Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -936,7 +949,7 @@ class PRWorkflowPoller(WorkflowPoller):
             state.branch_prefix = prefix
             state.branch_short  = short
 
-            # Extract PR number and draft status (from any run that has it)
+            # Extract PR number, draft status, and title (from any run that has it)
             for r in branch_runs:
                 prs = r.get("pull_requests") or []
                 if prs:
@@ -946,7 +959,14 @@ class PRWorkflowPoller(WorkflowPoller):
                         state.is_draft = self._fetch_pr_draft(pr_num, token)
                     elif pr_num:
                         state.is_draft = self._pr_cache[pr_num].get("draft", False)
+                    if pr_num and pr_num in self._pr_cache:
+                        state.pr_title = self._pr_cache[pr_num].get("title")
+                    if pr_num:
+                        state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
                     break
+
+            # Jira ticket key from branch name
+            state.jira_key = extract_jira_key(branch_name)
 
             # Determine notification based on aggregate status transitions
             notif_type: Optional[str] = None
@@ -999,7 +1019,7 @@ class PRWorkflowPoller(WorkflowPoller):
             resp.raise_for_status()
             data = resp.json()
             is_draft = data.get("draft", False)
-            self._pr_cache[pr_number] = {"draft": is_draft}
+            self._pr_cache[pr_number] = {"draft": is_draft, "title": data.get("title", "")}
             return is_draft
         except Exception:
             return False
@@ -1131,6 +1151,7 @@ class ActorWorkflowPoller(WorkflowPoller):
                 prefix, short = parse_branch_prefix(hb)
                 state.branch_prefix = prefix
                 state.branch_short  = short
+                state.jira_key = extract_jira_key(hb)
 
             # Determine notification
             notif_type: Optional[str] = None
@@ -1450,9 +1471,11 @@ def _init_status_icons():
 
 class WorkflowRow:
 
-    def __init__(self, parent: tk.Frame, wid: int, state: WorkflowState, alt: bool):
+    def __init__(self, parent: tk.Frame, wid: int, state: WorkflowState, alt: bool,
+                 jira_base_url: str = ""):
         self.wid    = wid
         self._state = state
+        self._jira_base_url = jira_base_url
         bg = BG_ROW_ALT if alt else BG_ROW
 
         self.frame = tk.Frame(parent, bg=bg)
@@ -1479,12 +1502,12 @@ class WorkflowRow:
         centre = tk.Frame(self.frame, bg=bg)
         centre.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=(8, 6))
 
-        # Line 1: workflow name + PR number + branch
-        top_row = tk.Frame(centre, bg=bg)
-        top_row.pack(fill=tk.X)
+        # Line 1: workflow name + PR number + branch (becomes subtitle in PR mode)
+        self._top_row = tk.Frame(centre, bg=bg)
+        self._top_row.pack(fill=tk.X)
 
         self._name_lbl = tk.Label(
-            top_row, text=state.name, font=("Segoe UI", 9),
+            self._top_row, text=state.name, font=("Segoe UI", 9),
             bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
         )
         self._name_lbl.pack(side=tk.LEFT)
@@ -1492,14 +1515,14 @@ class WorkflowRow:
 
         # Separator " / " between workflow name and PR info (hidden for non-PR)
         self._sep_lbl = tk.Label(
-            top_row, text=" / ", font=("Segoe UI", 9),
+            self._top_row, text=" / ", font=("Segoe UI", 9),
             bg=bg, fg=FG_MUTED, anchor="w",
         )
 
-        # PR number + branch short name (becomes the title for PR rows)
+        # PR number + branch short name (subtitle in PR mode, opens build run)
         self._branch_lbl = tk.Label(
-            top_row, text="", font=("Segoe UI", 9),
-            bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
+            self._top_row, text="", font=("Segoe UI", 8),
+            bg=bg, fg=FG_MUTED, cursor="hand2", anchor="w",
         )
         self._branch_lbl.bind("<Button-1>", self._open_url)
 
@@ -1517,6 +1540,20 @@ class WorkflowRow:
             bg="#3D3520", fg="#FBBF24", anchor="w", padx=3, pady=0,
         )
 
+        self._jira_lbl = tk.Label(
+            self._badge_row, text="", font=("Segoe UI", 7),
+            bg="#302830", fg="#A78BFA", anchor="w", padx=3, pady=0,
+            cursor="hand2",
+        )
+        self._jira_lbl.bind("<Button-1>", self._open_jira)
+
+        # PR title (becomes the main title for PR-mode rows, opens PR page)
+        self._pr_title_lbl = tk.Label(
+            centre, text="", font=("Segoe UI", 9),
+            bg=bg, fg=FG_TEXT, anchor="w", cursor="hand2",
+        )
+        self._pr_title_lbl.bind("<Button-1>", self._open_pr)
+
         # Line 3: status text
         self._info_lbl = tk.Label(
             centre, text="", font=("Segoe UI", 8),
@@ -1532,8 +1569,17 @@ class WorkflowRow:
         if url:
             webbrowser.open(url)
 
-    def update(self, state: WorkflowState, poll_rate: int):
+    def _open_pr(self, _event=None):
+        if self._state.pr_url:
+            webbrowser.open(self._state.pr_url)
+
+    def _open_jira(self, _event=None):
+        if self._jira_base_url and self._state.jira_key:
+            webbrowser.open(f"{self._jira_base_url.rstrip('/')}/browse/{self._state.jira_key}")
+
+    def update(self, state: WorkflowState, poll_rate: int, jira_base_url: str = ""):
         self._state = state
+        self._jira_base_url = jira_base_url or self._jira_base_url
         # Update accent bar colour
         self._accent.config(bg=COLOUR.get(state.status, COLOUR[ST_UNKNOWN]))
         # Update status icon
@@ -1559,13 +1605,21 @@ class WorkflowRow:
 
         self._info_lbl.config(text=status_txt)
 
-        # PR-mode labels — section header already shows workflow name,
-        # so hide name_lbl and show just PR# + branch as the row title.
+        # PR-mode labels — PR title is the main title (opens PR page),
+        # #number + branch is the subtitle (opens build run).
         has_badges = False
         if s.head_branch:
             self._name_lbl.pack_forget()
             self._sep_lbl.pack_forget()
 
+            # PR title as main title (above #number + branch)
+            if s.pr_title:
+                self._pr_title_lbl.config(text=s.pr_title)
+                self._pr_title_lbl.pack(fill=tk.X, before=self._top_row)
+            else:
+                self._pr_title_lbl.pack_forget()
+
+            # #number + branch as subtitle (opens build run)
             branch_text = s.branch_short or s.head_branch
             if s.pr_number:
                 branch_text = f"#{s.pr_number}  {branch_text}"
@@ -1586,6 +1640,13 @@ class WorkflowRow:
             else:
                 self._draft_lbl.pack_forget()
 
+            if s.jira_key and self._jira_base_url:
+                self._jira_lbl.config(text=s.jira_key)
+                self._jira_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                has_badges = True
+            else:
+                self._jira_lbl.pack_forget()
+
             if has_badges:
                 self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
             else:
@@ -1596,6 +1657,8 @@ class WorkflowRow:
             self._branch_lbl.pack_forget()
             self._prefix_lbl.pack_forget()
             self._draft_lbl.pack_forget()
+            self._jira_lbl.pack_forget()
+            self._pr_title_lbl.pack_forget()
             self._badge_row.pack_forget()
 
 
@@ -2156,9 +2219,10 @@ class MainWindow:
             self._states[key] = state
 
             alt = len(self._rows) % 2 == 1
-            row = WorkflowRow(container, wid, state, alt)
+            jira_url = self._config_mgr.get().get("jira_base_url", "")
+            row = WorkflowRow(container, wid, state, alt, jira_base_url=jira_url)
             poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
-            row.update(state, poll_rate)
+            row.update(state, poll_rate, jira_base_url=jira_url)
             self._rows[key] = row
 
             poller = WorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
@@ -2190,6 +2254,7 @@ class MainWindow:
         workflows = cfg.get("workflows") or []
         entry    = workflows[event.workflow_id] if event.workflow_id < len(workflows) else {}
         poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
+        jira_url  = cfg.get("jira_base_url", "")
 
         if event.removed:
             # Remove a stale PR row
@@ -2202,13 +2267,14 @@ class MainWindow:
             self._states[key] = event.new_state
             row = self._rows.get(key)
             if row:
-                row.update(event.new_state, poll_rate)
+                row.update(event.new_state, poll_rate, jira_base_url=jira_url)
             elif event.sub_key is not None:
                 # Dynamically create a new PR row inside its section container
                 container = self._wid_container.get(event.workflow_id, self._list_frame)
                 alt = len(self._rows) % 2 == 1
-                new_row = WorkflowRow(container, event.workflow_id, event.new_state, alt)
-                new_row.update(event.new_state, poll_rate)
+                new_row = WorkflowRow(container, event.workflow_id, event.new_state, alt,
+                                      jira_base_url=jira_url)
+                new_row.update(event.new_state, poll_rate, jira_base_url=jira_url)
                 self._rows[key] = new_row
 
         if self._tray:

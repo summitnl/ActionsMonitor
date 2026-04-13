@@ -19,23 +19,32 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 ## Requirements
 
 - Windows 10 / 11 (Linux works too, without the toast button feature)
-- Python 3.10 or newer — download from [python.org](https://www.python.org/downloads/), tick **"Add Python to PATH"** during install
 
-## Installation
+## Getting started
+
+1. Copy `config.template.yaml` to `config.yaml`
+2. Add your GitHub token and workflows (see [Configuration](#configuration) below)
+3. Run `ActionsMonitor.exe`
+
+### Development setup
+
+If you want to run from source instead of the exe:
 
 ```
 src\dev-install.bat
 ```
 
-That's it. The script installs all Python dependencies and creates a `config.yaml` from the template. The app launches automatically when done.
+Installs Python dependencies and creates `config.yaml` from the template.
 
-### Building a standalone `.exe`
+### Building the `.exe` from source
+
+Requires Python 3.10+ with dependencies installed (`pip install -r src/requirements.txt`).
 
 ```
 src\build.bat
 ```
 
-Produces `ActionsMonitor.exe` in the project root — a single file with the icon embedded. Place your `config.yaml` next to it.
+Produces `ActionsMonitor.exe` in the project root.
 
 ## Configuration
 
@@ -132,27 +141,22 @@ The tray icon follows the same logic, showing the worst state across all configu
 
 ## Uninstall
 
-```
-src\dev-uninstall.bat
-```
+Disable **Start with Windows** in the app footer, then delete the folder.
 
-Removes the startup registry entry and uninstalls the Python packages. Delete the folder afterwards.
+If you used the development setup, run `src\dev-uninstall.bat` to also remove the startup registry entry and Python packages.
 
 ## Updating
 
-The app checks for updates automatically on startup. If a new version is available, a dialog offers to pull and restart for you.
+The app checks for updates automatically on startup (when running from source). If a new version is available, a dialog offers to pull and restart for you.
 
-To update manually:
-
-```bash
-git pull
-pip install -r src/requirements.txt
-```
+For the exe, download the latest `ActionsMonitor.exe` and replace the old one.
 
 ## Changelog
 
 ### 2026-04-13
 
+- **PR title display** — PR-mode rows now show the pull request title below the PR number and branch name, fetched alongside draft status detection.
+- **Jira ticket links** — when `jira_base_url` is configured, Jira ticket IDs (e.g. `EDU-1234`) are extracted from branch names and shown as clickable badges on PR and actor-mode rows. Clicking opens the ticket in Jira.
 - **Fix PR mode false success with multiple workflows** — PR-mode entries now support an `extra_workflows` list that aggregates status across multiple workflow files. The row shows the worst-of status (failure > running > queued > success), so integration tests still running or failing are no longer hidden behind a passing primary workflow. Notifications fire on aggregate status transitions.
 - **Collapsible categories** — click any section header to collapse/expand its rows. Collapse state persists across restarts via `state.json`. Collapsed sections still contribute to the tray icon status.
 

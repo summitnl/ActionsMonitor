@@ -62,6 +62,8 @@ PRWorkflowPoller._poll()      # pr mode
   → group by head_branch        # latest run per workflow file per branch
   → aggregate status (worst wins)  # failure > running > queued > success
   → pick representative run     # highest-priority status run for display
+  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title
+  → extract_jira_key()          # regex on branch name
   → StatusEvent(sub_key=branch) → queue.Queue
   → MainWindow creates/updates/removes WorkflowRows dynamically
 

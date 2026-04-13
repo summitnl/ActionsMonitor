@@ -28,6 +28,11 @@
 #   4. Copy the generated token (starts with ghp_) and paste it below
 github_token: ""
 
+# Optional: Jira base URL
+# When set, Jira ticket IDs are extracted from branch names (e.g. EDU-1234)
+# and shown as clickable badges on PR and actor-mode rows.
+# jira_base_url: "https://mycompany.atlassian.net"
+
 # =============================================================================
 # Global Notification Settings
 # These apply to all workflows unless overridden per-workflow below.

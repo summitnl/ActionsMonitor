@@ -15,4 +15,3 @@ venv/
 build/
 dist/
 *.spec
-*.exe
