@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-04-14 (code cleanup)
+
+- **Code cleanup** — removed unused imports (`field`, `tkfont`), dead `_prev_conclusion(s)` tracking variables, extracted `_gh_headers()` helper (replaced 9 inline header constructions), extracted `_resolve_status()` helper (replaced 3 duplicated status-mapping blocks), extracted `_cache_pr()` helper (replaced 3 identical PR cache update blocks), consolidated state file I/O into `_load_state()`/`_write_state()`/`_persist_collapsed()` helpers, fixed redundant `config_mgr.get()` call in `_add_poller()`, and skipped `_generate_app_ico()` when `app.ico` already exists.
+
 ### 2026-04-14
 
 - **PR staleness badge** — PR-mode rows now show a colour-escalating staleness badge (yellow/orange/red) based on how long since the PR was last updated. Thresholds are configurable with human-friendly durations (`"1d"`, `"3d"`, `"5d"`). New `parse_duration()` utility accepts `"30m"`, `"12h"`, `"2d12h"`, etc. — also used by `pr_stale_after` and `stale_after` which now accept the same format (plain integers still work).

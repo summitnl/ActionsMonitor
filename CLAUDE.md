@@ -93,7 +93,7 @@ ActorWorkflowPoller._poll()   # actor mode
 ### Key classes
 
 - **`ConfigManager`** — loads `config.yaml` with `_deep_merge` against `DEFAULT_CONFIG`; thread-safe via a lock. `get()` always returns a snapshot.
-- **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`).
+- **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`). Base class for `PRWorkflowPoller` and `ActorWorkflowPoller`.
 - **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch` then by PR number, tracks per-(branch, PR) state, emits removal events for stale entries. Supports multiple PRs per branch (e.g. hotfix targeting both acceptance and production). Discovers all open user PRs via the Pulls API to ensure branches with old CI runs still appear. Fetches and caches PR draft status (refreshed every poll), title, and target branch.
 - **`ActorWorkflowPoller`** — subclass of `WorkflowPoller` (actor mode); fetches runs via repo-level `/actions/runs?actor=...`, groups by `workflow_name:head_branch`, supports client-side `filter: "failed"`. Uses `parse_actor_url()` for the different URL format.
 - **`WorkflowRow`** — auto-height tkinter widget with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
@@ -137,7 +137,7 @@ Lucide-inspired icons rendered with PIL at 4x supersampling + LANCZOS downscale.
 
 - `_make_base_icon(size)` — amber play triangle on warm dark rounded rect (supersampled)
 - `_make_icon_image(colour, size)` — base icon + coloured status dot (3-layer: dark outline → white ring → fill)
-- `_generate_app_ico()` — writes `app.ico` with embedded 16/32/48/256px sizes (largest first for proper ICO embedding)
+- `_generate_app_ico()` — writes `app.ico` with embedded 16/32/48/256px sizes (largest first for proper ICO embedding); skips regeneration if `app.ico` already exists
 - Window icon set via both `iconbitmap` (`.ico` file) and `wm_iconphoto` (PIL images at multiple sizes)
 
 ### Tray icon colour precedence
@@ -148,7 +148,7 @@ Lucide-inspired icons rendered with PIL at 4x supersampling + LANCZOS downscale.
 
 ### Window state
 
-`_save_window_state()` writes position/size to `state.json` on quit. `_restore_window_state()` reads it on startup and clamps to visible monitors using `EnumDisplayMonitors` + `GetMonitorInfoW` via ctypes. Falls back to tkinter `winfo_screenwidth/height` if ctypes fails.
+`_save_window_state()` writes position/size to `state.json` on quit. `_restore_window_state()` reads it on startup and clamps to visible monitors using `EnumDisplayMonitors` + `GetMonitorInfoW` via ctypes. Falls back to tkinter `winfo_screenwidth/height` if ctypes fails. State file I/O is consolidated via `_load_state()`, `_write_state()`, and `_persist_collapsed()` helpers.
 
 ### Auto-update check
 
@@ -178,6 +178,12 @@ PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
 ### Staleness thresholds
 
 Global `staleness_thresholds` config controls when PR-mode rows show a staleness badge based on the PR's `updated_at` field from the GitHub API. Three levels with escalating colours: `slightly_stale` (yellow), `moderately_stale` (orange), `very_stale` (red). Computed in `PRWorkflowPoller._poll()`, rendered as a badge in `WorkflowRow._update_labels()`.
+
+### Shared helpers
+
+- `_gh_headers(token)` — builds standard GitHub API request headers (Accept, API version, optional Bearer token). All GitHub API calls use this.
+- `_resolve_status(api_status, conclusion)` — maps GitHub API `status`/`conclusion` fields to internal status constants (`ST_SUCCESS`, `ST_FAILURE`, etc.) via `CONCLUSION_MAP`.
+- `PRWorkflowPoller._cache_pr(pr_num, pr_data)` — updates the PR detail cache from any GitHub Pulls API response dict.
 
 ### GitHub username caching
 

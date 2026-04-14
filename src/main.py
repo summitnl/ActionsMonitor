@@ -18,14 +18,14 @@ import time
 import queue
 import subprocess
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
 
 import tkinter as tk
-from tkinter import ttk, font as tkfont
+from tkinter import ttk
 
 # ---------------------------------------------------------------------------
 # Dependency checks
@@ -143,6 +143,29 @@ CONCLUSION_MAP = {
     "neutral":          ST_SUCCESS,
     None:               ST_RUNNING,
 }
+
+
+def _gh_headers(token: str) -> dict[str, str]:
+    """Build standard GitHub API request headers."""
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _resolve_status(api_status: str, conclusion: Optional[str]) -> str:
+    """Map GitHub API status/conclusion to an internal status constant."""
+    if api_status == "completed":
+        return CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
+    if api_status == "in_progress":
+        return ST_RUNNING
+    if api_status == "queued":
+        return ST_QUEUED
+    return ST_UNKNOWN
+
 
 # UI colours — warm dark base
 BG_DARK    = "#1C1917"   # stone-900
@@ -321,14 +344,7 @@ def fetch_latest_run(
     if branch:
         params["branch"] = branch
 
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
-    resp = requests.get(api_url, params=params, headers=headers, timeout=15)
+    resp = requests.get(api_url, params=params, headers=_gh_headers(token), timeout=15)
     resp.raise_for_status()
     runs = resp.json().get("workflow_runs", [])
     return runs[0] if runs else None
@@ -349,12 +365,7 @@ def fetch_github_username(token: str) -> Optional[str]:
     with _github_username_lock:
         if _cached_github_username is not None:
             return _cached_github_username
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "Authorization": f"Bearer {token}",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    resp = requests.get("https://api.github.com/user", headers=headers, timeout=15)
+    resp = requests.get("https://api.github.com/user", headers=_gh_headers(token), timeout=15)
     resp.raise_for_status()
     login = resp.json().get("login")
     with _github_username_lock:
@@ -376,13 +387,7 @@ def fetch_pr_runs(
         f"/actions/workflows/{workflow_file}/runs"
     )
     params = {"actor": actor, "event": "pull_request", "per_page": per_page}
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    resp = requests.get(api_url, params=params, headers=headers, timeout=15)
+    resp = requests.get(api_url, params=params, headers=_gh_headers(token), timeout=15)
     resp.raise_for_status()
     return resp.json().get("workflow_runs", [])
 
@@ -400,13 +405,7 @@ def fetch_actor_runs(
     params: dict = {"actor": actor, "per_page": per_page}
     if conclusion:
         params["conclusion"] = conclusion
-    headers = {
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-    resp = requests.get(api_url, params=params, headers=headers, timeout=15)
+    resp = requests.get(api_url, params=params, headers=_gh_headers(token), timeout=15)
     resp.raise_for_status()
     return resp.json().get("workflow_runs", [])
 
@@ -716,7 +715,6 @@ class WorkflowPoller(threading.Thread):
         self.name_display = cfg_entry.get("name") or wf_file or url
         self._prev_run_id    : Optional[int] = None
         self._prev_status    : Optional[str] = None
-        self._prev_conclusion: Optional[str] = None
 
     def stop(self):
         self._stop_evt.set()
@@ -780,14 +778,7 @@ class WorkflowPoller(threading.Thread):
         api_status  = run.get("status")       # queued / in_progress / completed
         conclusion  = run.get("conclusion")   # success / failure / … / None
 
-        if api_status == "completed":
-            state.status = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
-        elif api_status == "in_progress":
-            state.status = ST_RUNNING
-        elif api_status == "queued":
-            state.status = ST_QUEUED
-        else:
-            state.status = ST_UNKNOWN
+        state.status = _resolve_status(api_status, conclusion)
 
         state.run_id    = run_id
         state.run_url   = run.get("html_url")
@@ -811,7 +802,6 @@ class WorkflowPoller(threading.Thread):
 
         self._prev_run_id     = run_id
         self._prev_status     = api_status
-        self._prev_conclusion = conclusion
 
         self.event_queue.put(StatusEvent(self.wid, state, notif_type))
 
@@ -860,10 +850,18 @@ class PRWorkflowPoller(WorkflowPoller):
         # Per-branch tracking
         self._prev_run_ids:    dict[str, set[int]] = {}   # set of run IDs across all workflows
         self._prev_statuses:   dict[str, str] = {}        # aggregate status string
-        self._prev_conclusions: dict[str, Optional[str]] = {}
         self._last_seen:       dict[str, datetime] = {}
         # PR detail cache: pr_number → {draft: bool}
         self._pr_cache: dict[int, dict] = {}
+
+    def _cache_pr(self, pr_num: int, pr_data: dict):
+        """Update the PR cache from a PR API response dict."""
+        self._pr_cache[pr_num] = {
+            "draft": pr_data.get("draft", False),
+            "title": pr_data.get("title", ""),
+            "base_ref": pr_data.get("base", {}).get("ref", ""),
+            "updated_at": pr_data.get("updated_at", ""),
+        }
 
     def _poll(self):
         cfg   = self.config_mgr.get()
@@ -1034,14 +1032,7 @@ class PRWorkflowPoller(WorkflowPoller):
                 for run in group_runs:
                     api_status = run.get("status")
                     conclusion = run.get("conclusion")
-                    if api_status == "completed":
-                        st = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
-                    elif api_status == "in_progress":
-                        st = ST_RUNNING
-                    elif api_status == "queued":
-                        st = ST_QUEUED
-                    else:
-                        st = ST_UNKNOWN
+                    st = _resolve_status(api_status, conclusion)
                     run_statuses.append(st)
 
                     p = _REPR_PRIORITY.get(st, 0)
@@ -1126,7 +1117,6 @@ class PRWorkflowPoller(WorkflowPoller):
 
                 self._prev_run_ids[sub_key]     = cur_run_ids
                 self._prev_statuses[sub_key]    = agg_status
-                self._prev_conclusions[sub_key] = run.get("conclusion")
 
                 self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=sub_key))
 
@@ -1145,7 +1135,6 @@ class PRWorkflowPoller(WorkflowPoller):
                 del self._last_seen[sk]
                 self._prev_run_ids.pop(sk, None)
                 self._prev_statuses.pop(sk, None)
-                self._prev_conclusions.pop(sk, None)
 
     def _fetch_user_open_prs(self, username: str, token: str) -> list[dict]:
         """Fetch open PRs authored by the user. Returns list of {number, branch, base_ref}."""
@@ -1153,13 +1142,7 @@ class PRWorkflowPoller(WorkflowPoller):
             f"https://api.github.com/repos/{self.owner}/{self.repo}"
             f"/pulls?state=open&sort=updated&direction=desc&per_page=50"
         )
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=_gh_headers(token), timeout=15)
         resp.raise_for_status()
         results = []
         for pr in resp.json():
@@ -1170,14 +1153,7 @@ class PRWorkflowPoller(WorkflowPoller):
             if pr_num:
                 branch = pr.get("head", {}).get("ref", "")
                 base_ref = pr.get("base", {}).get("ref", "")
-                is_draft = pr.get("draft", False)
-                title = pr.get("title", "")
-                self._pr_cache[pr_num] = {
-                    "draft": is_draft,
-                    "title": title,
-                    "base_ref": base_ref,
-                    "updated_at": pr.get("updated_at", ""),
-                }
+                self._cache_pr(pr_num, pr)
                 results.append({"number": pr_num, "branch": branch, "base_ref": base_ref})
         return results
 
@@ -1188,13 +1164,7 @@ class PRWorkflowPoller(WorkflowPoller):
             f"/actions/workflows/{wf_file}/runs"
         )
         params = {"branch": branch, "per_page": 1}
-        headers = {
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
-        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp = requests.get(url, params=params, headers=_gh_headers(token), timeout=15)
         resp.raise_for_status()
         return resp.json().get("workflow_runs", [])
 
@@ -1205,28 +1175,14 @@ class PRWorkflowPoller(WorkflowPoller):
                 f"https://api.github.com/repos/{self.owner}/{self.repo}"
                 f"/pulls?head={self.owner}:{branch}&state=open&per_page=10"
             )
-            headers = {
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = requests.get(url, headers=_gh_headers(token), timeout=15)
             resp.raise_for_status()
             results = []
             for pr in resp.json():
                 pr_num = pr.get("number")
                 if pr_num:
-                    base_ref = pr.get("base", {}).get("ref", "")
-                    is_draft = pr.get("draft", False)
-                    title = pr.get("title", "")
-                    self._pr_cache[pr_num] = {
-                        "draft": is_draft,
-                        "title": title,
-                        "base_ref": base_ref,
-                        "updated_at": pr.get("updated_at", ""),
-                    }
-                    results.append({"number": pr_num, "base_ref": base_ref})
+                    self._cache_pr(pr_num, pr)
+                    results.append({"number": pr_num, "base_ref": pr.get("base", {}).get("ref", "")})
             return results
         except Exception:
             return []
@@ -1235,23 +1191,11 @@ class PRWorkflowPoller(WorkflowPoller):
         """Fetch draft status for a PR. Caches the result."""
         try:
             url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
-            headers = {
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = requests.get(url, headers=_gh_headers(token), timeout=15)
             resp.raise_for_status()
             data = resp.json()
-            is_draft = data.get("draft", False)
-            self._pr_cache[pr_number] = {
-                "draft": is_draft,
-                "title": data.get("title", ""),
-                "base_ref": data.get("base", {}).get("ref", ""),
-                "updated_at": data.get("updated_at", ""),
-            }
-            return is_draft
+            self._cache_pr(pr_number, data)
+            return data.get("draft", False)
         except Exception:
             return False
 
@@ -1263,13 +1207,7 @@ class PRWorkflowPoller(WorkflowPoller):
                 f"https://api.github.com/repos/{self.owner}/{self.repo}"
                 f"/pulls/{pr_number}/reviews"
             )
-            headers = {
-                "Accept": "application/vnd.github+json",
-                "X-GitHub-Api-Version": "2022-11-28",
-            }
-            if token:
-                headers["Authorization"] = f"Bearer {token}"
-            resp = requests.get(url, headers=headers, timeout=15)
+            resp = requests.get(url, headers=_gh_headers(token), timeout=15)
             resp.raise_for_status()
             reviews = resp.json()
 
@@ -1315,7 +1253,6 @@ class ActorWorkflowPoller(WorkflowPoller):
         # Per-run tracking, keyed by composite "workflow_id:head_branch"
         self._prev_run_ids:     dict[str, int] = {}
         self._prev_statuses:    dict[str, str] = {}
-        self._prev_conclusions: dict[str, Optional[str]] = {}
         self._last_seen:        dict[str, datetime] = {}
 
     def _poll(self):
@@ -1399,14 +1336,7 @@ class ActorWorkflowPoller(WorkflowPoller):
             )
             state.last_check = now
 
-            if api_status == "completed":
-                state.status = CONCLUSION_MAP.get(conclusion, ST_UNKNOWN)
-            elif api_status == "in_progress":
-                state.status = ST_RUNNING
-            elif api_status == "queued":
-                state.status = ST_QUEUED
-            else:
-                state.status = ST_UNKNOWN
+            state.status = _resolve_status(api_status, conclusion)
 
             state.run_id     = run_id
             state.run_url    = run.get("html_url")
@@ -1439,7 +1369,6 @@ class ActorWorkflowPoller(WorkflowPoller):
 
             self._prev_run_ids[composite_key]     = run_id
             self._prev_statuses[composite_key]    = api_status
-            self._prev_conclusions[composite_key] = conclusion
 
             self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=composite_key))
 
@@ -1457,7 +1386,6 @@ class ActorWorkflowPoller(WorkflowPoller):
                 del self._last_seen[key]
                 self._prev_run_ids.pop(key, None)
                 self._prev_statuses.pop(key, None)
-                self._prev_conclusions.pop(key, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1654,7 +1582,10 @@ def _make_icon_image(colour: str, size: int = 64) -> Image.Image:
 
 
 def _generate_app_ico() -> None:
-    """Generate app.ico with multiple sizes for crisp display at all scales."""
+    """Generate app.ico with multiple sizes for crisp display at all scales.
+    Skips regeneration if the file already exists."""
+    if APP_ICO.exists():
+        return
     try:
         sizes = [256, 48, 32, 16]  # largest first for proper ICO embedding
         images = [_make_base_icon(s) for s in sizes]
@@ -2471,17 +2402,9 @@ class MainWindow:
     def _save_collapse_state(self):
         """Persist collapsed sections to state.json."""
         try:
-            state = {}
-            if STATE_FILE.exists():
-                with open(STATE_FILE, encoding="utf-8") as fh:
-                    state = json.load(fh)
-            collapsed = [t for t, c in self._collapsed.items() if c]
-            if collapsed:
-                state["collapsed_sections"] = collapsed
-            else:
-                state.pop("collapsed_sections", None)
-            with open(STATE_FILE, "w", encoding="utf-8") as fh:
-                json.dump(state, fh, indent=2)
+            state = self._load_state()
+            self._persist_collapsed(state)
+            self._write_state(state)
         except Exception:
             pass
 
@@ -2516,11 +2439,13 @@ class MainWindow:
             self._wid_container[wid] = container
 
         for wid, entry in enumerate(workflows):
-            self._add_poller(wid, entry)
+            self._add_poller(wid, entry, cfg)
 
-    def _add_poller(self, wid: int, entry: dict):
+    def _add_poller(self, wid: int, entry: dict, cfg: Optional[dict] = None):
         if wid in self._pollers:
             return
+        if cfg is None:
+            cfg = self._config_mgr.get()
         mode = entry.get("mode", "branch")
         url = entry.get("url", "")
         try:
@@ -2545,7 +2470,7 @@ class MainWindow:
             self._states[key] = state
 
             alt = len(self._rows) % 2 == 1
-            jira_url = self._config_mgr.get().get("jira_base_url", "")
+            jira_url = cfg.get("jira_base_url", "")
             row = WorkflowRow(container, wid, state, alt, jira_base_url=jira_url)
             poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
             row.update(state, poll_rate, jira_base_url=jira_url)
@@ -2653,36 +2578,47 @@ class MainWindow:
     # ------------------------------------------------------------------
     # Window state persistence
     # ------------------------------------------------------------------
+    @staticmethod
+    def _load_state() -> dict:
+        """Load state.json, returning an empty dict on any error."""
+        if STATE_FILE.exists():
+            with open(STATE_FILE, encoding="utf-8") as fh:
+                return json.load(fh)
+        return {}
+
+    @staticmethod
+    def _write_state(state: dict):
+        """Write state dict to state.json."""
+        with open(STATE_FILE, "w", encoding="utf-8") as fh:
+            json.dump(state, fh, indent=2)
+
+    def _persist_collapsed(self, state: dict):
+        """Update the collapsed_sections key in a state dict."""
+        collapsed = [t for t, c in self._collapsed.items() if c]
+        if collapsed:
+            state["collapsed_sections"] = collapsed
+        else:
+            state.pop("collapsed_sections", None)
+
     def _save_window_state(self):
         """Save current window geometry to state.json."""
         try:
-            state = {}
-            if STATE_FILE.exists():
-                with open(STATE_FILE, encoding="utf-8") as fh:
-                    state = json.load(fh)
+            state = self._load_state()
             state["window"] = {
                 "x": self._root.winfo_x(),
                 "y": self._root.winfo_y(),
                 "width": self._root.winfo_width(),
                 "height": self._root.winfo_height(),
             }
-            collapsed = [t for t, c in self._collapsed.items() if c]
-            if collapsed:
-                state["collapsed_sections"] = collapsed
-            else:
-                state.pop("collapsed_sections", None)
-            with open(STATE_FILE, "w", encoding="utf-8") as fh:
-                json.dump(state, fh, indent=2)
+            self._persist_collapsed(state)
+            self._write_state(state)
         except Exception as exc:
             print(f"[State] Save error: {exc}")
 
     def _restore_collapse_state(self):
         """Load collapsed section titles from state.json."""
         try:
-            if not STATE_FILE.exists():
-                return
-            with open(STATE_FILE, encoding="utf-8") as fh:
-                state = json.load(fh)
+            state = self._load_state()
             for title in state.get("collapsed_sections", []):
                 self._collapsed[title] = True
         except Exception:
@@ -2691,10 +2627,7 @@ class MainWindow:
     def _restore_window_state(self):
         """Restore window geometry from state.json, clamped to visible monitors."""
         try:
-            if not STATE_FILE.exists():
-                return
-            with open(STATE_FILE, encoding="utf-8") as fh:
-                state = json.load(fh)
+            state = self._load_state()
             win = state.get("window")
             if not win:
                 return
