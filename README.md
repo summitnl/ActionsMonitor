@@ -7,7 +7,7 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 ## Features
 
 - **Live status** — polls your configured workflows and shows green / orange / red status indicators
-- **PR mode** — monitor your own pull request builds: one row per active PR, with branch prefix tags, PR numbers, and a DRAFT indicator. Stale rows auto-remove after a configurable timeout
+- **PR mode** — monitor your own pull request builds: one row per active PR, with branch prefix tags, PR numbers, target branch indicators, and a DRAFT indicator. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Stale rows auto-remove after a configurable timeout
 - **System tray** — minimises to tray; tray icon colour reflects the worst combined state across all workflows
 
   ![System tray icon](docs/systemtray.png)
@@ -108,8 +108,9 @@ Set `mode: "pr"` to see one row per active PR you authored. Your GitHub username
 
 PR rows show:
 - Branch prefix tags (e.g. `hotfix`, `feature`, `chore`) parsed from the branch name
-- PR number and cleaned branch name
+- PR number, cleaned branch name, and target branch (e.g. `#42 fix-123 → acceptance`)
 - A **DRAFT** badge when the PR is a draft
+- When a branch has multiple PRs targeting different branches, each PR appears as a separate row
 
 ### Notifications
 
@@ -152,6 +153,10 @@ The app checks for updates automatically on startup (when running from source). 
 For the exe, download the latest `ActionsMonitor.exe` and replace the old one.
 
 ## Changelog
+
+### 2026-04-14
+
+- **Multiple PRs per branch** — PR-mode now shows separate rows when a branch has multiple PRs targeting different branches (e.g. `hotfix/fix-123 → acceptance` and `hotfix/fix-123 → production`). Each row displays its own target branch, PR number, draft status, review status, and build status independently.
 
 ### 2026-04-13
 

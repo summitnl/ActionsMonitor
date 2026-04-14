@@ -62,12 +62,13 @@ PRWorkflowPoller._poll()      # pr mode
   → fetch_github_username()     # cached GET /user
   → fetch_pr_runs() × N         # primary + extra_workflows
   → group by head_branch        # latest run per workflow file per branch
-  → aggregate status (worst wins)  # failure > running > queued > success
+  → group by PR number          # one sub-group per unique PR (supports multiple PRs per branch)
+  → aggregate status (worst wins)  # failure > running > queued > success (per PR)
   → pick representative run     # highest-priority status run for display
-  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title
+  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title + base_ref
   → _fetch_pr_review_status()   # GET /pulls/{n}/reviews → approved/changes_requested/pending
   → extract_jira_key()          # regex on branch name
-  → StatusEvent(sub_key=branch) → queue.Queue
+  → StatusEvent(sub_key=branch#pr) → queue.Queue   # one event per (branch, PR) pair
   → MainWindow creates/updates/removes WorkflowRows dynamically
 
 ActorWorkflowPoller._poll()   # actor mode
@@ -81,14 +82,14 @@ ActorWorkflowPoller._poll()   # actor mode
 ### Workflow modes
 
 - **Branch mode** (`mode: "branch"`, default) — one fixed row per workflow+branch combo. Uses `WorkflowPoller`.
-- **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` seconds.
+- **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` seconds.
 - **Actor mode** (`mode: "actor"`) — one row per recent workflow run by the authenticated user across all workflows in a repo. Uses `ActorWorkflowPoller`. Supports `filter: "failed"` to show only failed runs. Rows are created dynamically and auto-removed after `stale_after` seconds.
 
 ### Key classes
 
 - **`ConfigManager`** — loads `config.yaml` with `_deep_merge` against `DEFAULT_CONFIG`; thread-safe via a lock. `get()` always returns a snapshot.
 - **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`).
-- **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch`, tracks per-branch state, emits removal events for stale branches. Fetches and caches PR draft status.
+- **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch` then by PR number, tracks per-(branch, PR) state, emits removal events for stale entries. Supports multiple PRs per branch (e.g. hotfix targeting both acceptance and production). Fetches and caches PR draft status, title, and target branch.
 - **`ActorWorkflowPoller`** — subclass of `WorkflowPoller` (actor mode); fetches runs via repo-level `/actions/runs?actor=...`, groups by `workflow_name:head_branch`, supports client-side `filter: "failed"`. Uses `parse_actor_url()` for the different URL format.
 - **`WorkflowRow`** — auto-height tkinter widget with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
 - **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.
@@ -98,7 +99,7 @@ ActorWorkflowPoller._poll()   # actor mode
 
 ### Composite keys
 
-`MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows and the head branch name for PR-mode rows. This allows multiple dynamic rows per poller.
+`MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows, `branch#pr_num` for PR-mode rows (or just `branch` when no PR is detected), and a composite string for actor-mode rows. This allows multiple dynamic rows per poller, including multiple PRs from the same branch.
 
 ## Visual system
 
