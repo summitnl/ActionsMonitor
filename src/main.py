@@ -2237,15 +2237,20 @@ class MainWindow:
         self._list_frame = tk.Frame(canvas, bg=BG_DARK)
         self._canvas_window = canvas.create_window((0, 0), window=self._list_frame, anchor="nw")
 
+        def _update_scroll_region():
+            req_h = self._list_frame.winfo_reqheight()
+            vis_h = canvas.winfo_height()
+            canvas.itemconfig(self._canvas_window, width=canvas.winfo_width(),
+                              height=max(req_h, vis_h))
+            canvas.configure(scrollregion=(0, 0, self._list_frame.winfo_reqwidth(),
+                                           max(req_h, vis_h)))
+
         def _on_canvas_configure(e):
-            canvas.itemconfig(self._canvas_window, width=e.width)
+            canvas.after_idle(_update_scroll_region)
         canvas.bind("<Configure>", _on_canvas_configure)
 
         def _on_frame_configure(_e):
-            # Use after_idle so geometry is fully resolved before updating scroll region
-            canvas.after_idle(lambda: canvas.configure(
-                scrollregion=(0, 0, self._list_frame.winfo_reqwidth(),
-                              self._list_frame.winfo_reqheight())))
+            canvas.after_idle(_update_scroll_region)
         self._list_frame.bind("<Configure>", _on_frame_configure)
 
         def _on_mousewheel(e):

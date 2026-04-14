@@ -180,9 +180,9 @@ PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
 
 ## Conventions
 
-### README changelog
+### Changelog
 
-When adding features, always add a dated changelog entry to the `## Changelog` section at the bottom of `README.md`. Do not modify existing entries — only append new ones at the top of the list.
+When adding features, always add a dated changelog entry to `CHANGELOG.md`. Do not modify existing entries — only append new ones at the top of the list.
 
 ### Building
 
