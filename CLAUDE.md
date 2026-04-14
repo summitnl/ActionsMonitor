@@ -61,11 +61,14 @@ WorkflowPoller._poll()        # branch mode (default)
 PRWorkflowPoller._poll()      # pr mode
   → fetch_github_username()     # cached GET /user
   → fetch_pr_runs() × N         # primary + extra_workflows
+  → _fetch_user_open_prs()      # GET /pulls?state=open — discovers PRs with old/no runs
+  → _fetch_branch_runs() × M    # per-branch fetch for newly discovered PR branches
   → group by head_branch        # latest run per workflow file per branch
   → group by PR number          # one sub-group per unique PR (supports multiple PRs per branch)
+  → _fetch_prs_for_branch()     # fallback: GET /pulls?head=... when runs lack PR data
   → aggregate status (worst wins)  # failure > running > queued > success (per PR)
   → pick representative run     # highest-priority status run for display
-  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title + base_ref
+  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title + base_ref (every poll)
   → _fetch_pr_review_status()   # GET /pulls/{n}/reviews → approved/changes_requested/pending
   → extract_jira_key()          # regex on branch name
   → StatusEvent(sub_key=branch#pr) → queue.Queue   # one event per (branch, PR) pair
@@ -89,7 +92,7 @@ ActorWorkflowPoller._poll()   # actor mode
 
 - **`ConfigManager`** — loads `config.yaml` with `_deep_merge` against `DEFAULT_CONFIG`; thread-safe via a lock. `get()` always returns a snapshot.
 - **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`).
-- **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch` then by PR number, tracks per-(branch, PR) state, emits removal events for stale entries. Supports multiple PRs per branch (e.g. hotfix targeting both acceptance and production). Fetches and caches PR draft status, title, and target branch.
+- **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch` then by PR number, tracks per-(branch, PR) state, emits removal events for stale entries. Supports multiple PRs per branch (e.g. hotfix targeting both acceptance and production). Discovers all open user PRs via the Pulls API to ensure branches with old CI runs still appear. Fetches and caches PR draft status (refreshed every poll), title, and target branch.
 - **`ActorWorkflowPoller`** — subclass of `WorkflowPoller` (actor mode); fetches runs via repo-level `/actions/runs?actor=...`, groups by `workflow_name:head_branch`, supports client-side `filter: "failed"`. Uses `parse_actor_url()` for the different URL format.
 - **`WorkflowRow`** — auto-height tkinter widget with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
 - **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.

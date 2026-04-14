@@ -880,6 +880,27 @@ class PRWorkflowPoller(WorkflowPoller):
                     self.event_queue.put(StatusEvent(self.wid, state))
                     return
 
+        # Ensure open PRs by the user are included even if their runs fell
+        # off the per_page window.  Fetch the user's open PRs once and, for
+        # any branch not yet present, fetch its latest runs individually.
+        branches_with_runs = {r.get("head_branch") for r in all_runs}
+        try:
+            open_prs = self._fetch_user_open_prs(username, token)
+        except Exception:
+            open_prs = []
+        for pr in open_prs:
+            branch = pr["branch"]
+            if branch in branches_with_runs:
+                continue
+            # Fetch latest runs for this branch across all configured workflows
+            for wf_file in all_wf_files:
+                try:
+                    runs = self._fetch_branch_runs(wf_file, branch, token)
+                    all_runs.extend(runs)
+                except Exception:
+                    pass
+            branches_with_runs.add(branch)
+
         # Group all runs by head_branch, keeping latest per workflow file
         by_branch: dict[str, list[dict]] = {}
         seen_wf_per_branch: dict[str, set[str]] = {}
@@ -920,6 +941,11 @@ class PRWorkflowPoller(WorkflowPoller):
                     pr_num = pr_entry.get("number")
                     if pr_num and pr_num not in pr_numbers_seen:
                         pr_numbers_seen[pr_num] = pr_entry.get("base", {}).get("ref", "")
+
+            # Fallback: query the Pulls API when workflow runs lack PR data
+            if not pr_numbers_seen:
+                for pr_info in self._fetch_prs_for_branch(branch_name, token):
+                    pr_numbers_seen[pr_info["number"]] = pr_info["base_ref"]
 
             # Build groups: one per PR, or a single fallback group if no PRs found
             if not pr_numbers_seen:
@@ -1002,10 +1028,8 @@ class PRWorkflowPoller(WorkflowPoller):
                 if pr_num is not None:
                     state.pr_number = pr_num
                     state.pr_target = pr_base_ref
-                    if pr_num not in self._pr_cache:
-                        state.is_draft = self._fetch_pr_draft(pr_num, token)
-                    else:
-                        state.is_draft = self._pr_cache[pr_num].get("draft", False)
+                    # Always re-fetch PR details to keep draft/title up to date
+                    state.is_draft = self._fetch_pr_draft(pr_num, token)
                     if pr_num in self._pr_cache:
                         state.pr_title = self._pr_cache[pr_num].get("title")
                         if not state.pr_target:
@@ -1052,6 +1076,88 @@ class PRWorkflowPoller(WorkflowPoller):
                 self._prev_run_ids.pop(sk, None)
                 self._prev_statuses.pop(sk, None)
                 self._prev_conclusions.pop(sk, None)
+
+    def _fetch_user_open_prs(self, username: str, token: str) -> list[dict]:
+        """Fetch open PRs authored by the user. Returns list of {number, branch, base_ref}."""
+        url = (
+            f"https://api.github.com/repos/{self.owner}/{self.repo}"
+            f"/pulls?state=open&sort=updated&direction=desc&per_page=50"
+        )
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = requests.get(url, headers=headers, timeout=15)
+        resp.raise_for_status()
+        results = []
+        for pr in resp.json():
+            author = pr.get("user", {}).get("login", "")
+            if author.lower() != username.lower():
+                continue
+            pr_num = pr.get("number")
+            if pr_num:
+                branch = pr.get("head", {}).get("ref", "")
+                base_ref = pr.get("base", {}).get("ref", "")
+                is_draft = pr.get("draft", False)
+                title = pr.get("title", "")
+                self._pr_cache[pr_num] = {
+                    "draft": is_draft,
+                    "title": title,
+                    "base_ref": base_ref,
+                }
+                results.append({"number": pr_num, "branch": branch, "base_ref": base_ref})
+        return results
+
+    def _fetch_branch_runs(self, wf_file: str, branch: str, token: str) -> list[dict]:
+        """Fetch latest workflow runs for a specific branch."""
+        url = (
+            f"https://api.github.com/repos/{self.owner}/{self.repo}"
+            f"/actions/workflows/{wf_file}/runs"
+        )
+        params = {"branch": branch, "per_page": 1}
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        resp = requests.get(url, params=params, headers=headers, timeout=15)
+        resp.raise_for_status()
+        return resp.json().get("workflow_runs", [])
+
+    def _fetch_prs_for_branch(self, branch: str, token: str) -> list[dict]:
+        """Fetch open PRs for a head branch. Returns list of {number, base_ref}."""
+        try:
+            url = (
+                f"https://api.github.com/repos/{self.owner}/{self.repo}"
+                f"/pulls?head={self.owner}:{branch}&state=open&per_page=10"
+            )
+            headers = {
+                "Accept": "application/vnd.github+json",
+                "X-GitHub-Api-Version": "2022-11-28",
+            }
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
+            resp = requests.get(url, headers=headers, timeout=15)
+            resp.raise_for_status()
+            results = []
+            for pr in resp.json():
+                pr_num = pr.get("number")
+                if pr_num:
+                    base_ref = pr.get("base", {}).get("ref", "")
+                    is_draft = pr.get("draft", False)
+                    title = pr.get("title", "")
+                    self._pr_cache[pr_num] = {
+                        "draft": is_draft,
+                        "title": title,
+                        "base_ref": base_ref,
+                    }
+                    results.append({"number": pr_num, "base_ref": base_ref})
+            return results
+        except Exception:
+            return []
 
     def _fetch_pr_draft(self, pr_number: int, token: str) -> bool:
         """Fetch draft status for a PR. Caches the result."""
@@ -1622,8 +1728,8 @@ class WorkflowRow:
         )
 
         self._draft_lbl = tk.Label(
-            self._badge_row, text="DRAFT", font=("Segoe UI", 7),
-            bg="#3D3520", fg="#FBBF24", anchor="w", padx=3, pady=0,
+            self._badge_row, text="DRAFT", font=("Segoe UI", 7, "bold"),
+            bg="#92400E", fg="#FEF3C7", anchor="w", padx=4, pady=0,
         )
 
         self._jira_lbl = tk.Label(
