@@ -63,6 +63,7 @@ PRWorkflowPoller._poll()      # pr mode
   → fetch_pr_runs() × N         # primary + extra_workflows
   → _fetch_user_open_prs()      # GET /pulls?state=open — discovers PRs with old/no runs
   → _fetch_branch_runs() × M    # per-branch fetch for newly discovered PR branches
+  → filter out closed PRs       # drop runs for branches without an open PR
   → group by head_branch        # latest run per workflow file per branch
   → group by PR number          # one sub-group per unique PR (supports multiple PRs per branch)
   → _fetch_prs_for_branch()     # fallback: GET /pulls?head=... when runs lack PR data

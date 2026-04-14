@@ -880,14 +880,14 @@ class PRWorkflowPoller(WorkflowPoller):
                     self.event_queue.put(StatusEvent(self.wid, state))
                     return
 
-        # Ensure open PRs by the user are included even if their runs fell
-        # off the per_page window.  Fetch the user's open PRs once and, for
-        # any branch not yet present, fetch its latest runs individually.
+        # Fetch the user's open PRs — used to discover branches with old runs
+        # AND to filter out branches whose PRs have been closed/merged.
         branches_with_runs = {r.get("head_branch") for r in all_runs}
         try:
             open_prs = self._fetch_user_open_prs(username, token)
         except Exception:
             open_prs = []
+        open_pr_branches = {pr["branch"] for pr in open_prs}
         for pr in open_prs:
             branch = pr["branch"]
             if branch in branches_with_runs:
@@ -900,6 +900,10 @@ class PRWorkflowPoller(WorkflowPoller):
                 except Exception:
                     pass
             branches_with_runs.add(branch)
+
+        # Drop runs for branches that no longer have an open PR
+        if open_pr_branches:
+            all_runs = [r for r in all_runs if r.get("head_branch") in open_pr_branches]
 
         # Group all runs by head_branch, keeping latest per workflow file
         by_branch: dict[str, list[dict]] = {}
