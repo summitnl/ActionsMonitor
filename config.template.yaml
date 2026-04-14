@@ -77,6 +77,21 @@ notifications:
   #     enabled: false
 
 # =============================================================================
+# PR Staleness Thresholds
+# =============================================================================
+# Controls when PR-mode rows show a staleness badge based on time since last
+# update (from the GitHub PR API's updated_at field).
+#
+# Accepts human-friendly durations: "30m", "12h", "1d", "2d12h", etc.
+# Units: s = seconds, m = minutes, h = hours, d = days.
+# Plain integers are treated as seconds for backward compatibility.
+# =============================================================================
+staleness_thresholds:
+  slightly_stale: "1d"        # Yellow badge after 1 day
+  moderately_stale: "3d"      # Orange badge after 3 days
+  very_stale: "5d"            # Red badge after 5 days
+
+# =============================================================================
 # Workflows to Monitor
 # =============================================================================
 # Paste the URL of the GitHub Actions workflow page below.
@@ -118,7 +133,7 @@ workflows:
   #   mode: "pr"                  # Shows one row per PR branch you authored
   #   polling_rate: 45
   #   max_prs: 5                  # Max PR rows to show (default: 5)
-  #   pr_stale_after: 300         # Seconds before removing a stale PR row (default: 300)
+  #   pr_stale_after: "5m"        # Duration before removing a stale PR row (default: "5m")
   #   extra_workflows:            # Optional: additional workflow files to aggregate status from
   #     - integration-tests.yml   # Row shows worst-of status across all workflows
   #     - e2e-tests.yml           # (failure > running > queued > success)
@@ -129,7 +144,7 @@ workflows:
   #   mode: "pr"
   #   polling_rate: 45
   #   max_prs: 5
-  #   pr_stale_after: 300
+  #   pr_stale_after: "5m"
   #   extra_workflows:
   #     - acceptance-pr-e2e-integrationtests.yml
   #     - acceptance-pr-lint.yml
@@ -142,7 +157,7 @@ workflows:
   #   mode: "actor"
   #   polling_rate: 120
   #   max_runs: 10              # Max rows to show (default: 10)
-  #   stale_after: 300          # Seconds before removing a stale row (default: 300)
+  #   stale_after: "5m"          # Duration before removing a stale row (default: "5m")
   #   filter: "all"             # "all" or "failed" — only show failed runs (default: "all")
   #
 

@@ -71,7 +71,7 @@ github_token: "ghp_xxxxxxxxxxxxxxxxxxxx"
 
 ### Adding workflows
 
-There are two modes: **branch mode** (default) monitors a specific workflow+branch combo, and **PR mode** monitors your own pull request builds.
+There are three modes: **branch mode** (default) monitors a specific workflow+branch combo, **PR mode** monitors your own pull request builds, and **actor mode** shows all your recent runs across a repo.
 
 #### Branch mode
 
@@ -105,14 +105,27 @@ Set `mode: "pr"` to see one row per active PR you authored. Your GitHub username
     mode: "pr"
     polling_rate: 45
     max_prs: 5             # max PR rows to show (default: 5)
-    pr_stale_after: 300    # seconds before removing a stale row (default: 300)
+    pr_stale_after: "5m"   # duration before removing a stale row (default: "5m")
 ```
 
 PR rows show:
 - Branch prefix tags (e.g. `hotfix`, `feature`, `chore`) parsed from the branch name
 - PR number, cleaned branch name, and target branch (e.g. `#42 fix-123 → acceptance`)
 - A **DRAFT** badge when the PR is a draft
+- A colour-escalating **STALE** badge (yellow → orange → red) based on how long since the PR was last updated
+- Review status badges: **APPROVED**, **CHANGES REQUESTED**, or **REVIEW PENDING**
 - When a branch has multiple PRs targeting different branches, each PR appears as a separate row
+
+#### Staleness thresholds
+
+Global config that controls when the STALE badge appears on PR rows. Accepts human-friendly durations (`"30m"`, `"12h"`, `"1d"`, `"2d12h"`):
+
+```yaml
+staleness_thresholds:
+  slightly_stale: "1d"      # yellow badge after 1 day
+  moderately_stale: "3d"    # orange badge after 3 days
+  very_stale: "5d"          # red badge after 5 days
+```
 
 ### Notifications
 

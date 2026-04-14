@@ -69,8 +69,9 @@ PRWorkflowPoller._poll()      # pr mode
   → _fetch_prs_for_branch()     # fallback: GET /pulls?head=... when runs lack PR data
   → aggregate status (worst wins)  # failure > running > queued > success (per PR)
   → pick representative run     # highest-priority status run for display
-  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title + base_ref (every poll)
+  → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title + base_ref + updated_at (every poll)
   → _fetch_pr_review_status()   # GET /pulls/{n}/reviews → approved/changes_requested/pending
+  → compute staleness_level     # compare updated_at age against staleness_thresholds
   → extract_jira_key()          # regex on branch name
   → StatusEvent(sub_key=branch#pr) → queue.Queue   # one event per (branch, PR) pair
   → MainWindow creates/updates/removes WorkflowRows dynamically
@@ -86,8 +87,8 @@ ActorWorkflowPoller._poll()   # actor mode
 ### Workflow modes
 
 - **Branch mode** (`mode: "branch"`, default) — one fixed row per workflow+branch combo. Uses `WorkflowPoller`.
-- **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` seconds.
-- **Actor mode** (`mode: "actor"`) — one row per recent workflow run by the authenticated user across all workflows in a repo. Uses `ActorWorkflowPoller`. Supports `filter: "failed"` to show only failed runs. Rows are created dynamically and auto-removed after `stale_after` seconds.
+- **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` (default `"5m"`). Shows a colour-escalating staleness badge based on `staleness_thresholds`.
+- **Actor mode** (`mode: "actor"`) — one row per recent workflow run by the authenticated user across all workflows in a repo. Uses `ActorWorkflowPoller`. Supports `filter: "failed"` to show only failed runs. Rows are created dynamically and auto-removed after `stale_after` (default `"5m"`).
 
 ### Key classes
 
@@ -169,6 +170,14 @@ For PR-mode workflows, an optional `notifications.pr` subsection is merged betwe
 branch-mode: global[type] → per-workflow[type] → final
 PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
 ```
+
+### Duration parsing
+
+`parse_duration()` converts human-friendly duration strings (`"30m"`, `"12h"`, `"1d"`, `"2d12h"`) to seconds. Also accepts plain integers for backward compatibility. Used by `staleness_thresholds`, `pr_stale_after`, and `stale_after`. When adding new time-based config values, prefer this over raw seconds.
+
+### Staleness thresholds
+
+Global `staleness_thresholds` config controls when PR-mode rows show a staleness badge based on the PR's `updated_at` field from the GitHub API. Three levels with escalating colours: `slightly_stale` (yellow), `moderately_stale` (orange), `very_stale` (red). Computed in `PRWorkflowPoller._poll()`, rendered as a badge in `WorkflowRow._update_labels()`.
 
 ### GitHub username caching
 

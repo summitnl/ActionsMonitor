@@ -176,6 +176,11 @@ DEFAULT_CONFIG: dict = {
         "failure":  {"enabled": True,  "sound": "default"},
         "success":  {"enabled": True,  "sound": "none"},
     },
+    "staleness_thresholds": {
+        "slightly_stale": "1d",
+        "moderately_stale": "3d",
+        "very_stale": "5d",
+    },
     "workflows": [],
 }
 
@@ -430,6 +435,39 @@ def extract_jira_key(branch: str) -> Optional[str]:
     return m.group(1).upper() if m else None
 
 
+# Duration parsing
+_DURATION_RE = re.compile(r"(\d+)\s*([smhd])", re.IGNORECASE)
+_DURATION_MULT = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+
+
+def parse_duration(value) -> int:
+    """Parse a human-friendly duration to seconds (e.g. '1d', '12h', '2d12h'). Plain ints pass through."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    total = sum(int(n) * _DURATION_MULT[u.lower()] for n, u in _DURATION_RE.findall(str(value)))
+    if total:
+        return total
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return 0
+
+
+def _format_age(updated_at_str: str) -> str:
+    """Convert an ISO 8601 timestamp to a short relative age string like '3d', '12h', '45m'."""
+    try:
+        dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+        delta = (datetime.now(dt.tzinfo) - dt).total_seconds()
+        if delta < 3600:
+            return f"{max(1, int(delta // 60))}m"
+        elif delta < 86400:
+            return f"{int(delta // 3600)}h"
+        else:
+            return f"{int(delta // 86400)}d"
+    except Exception:
+        return ""
+
+
 # ---------------------------------------------------------------------------
 # Workflow state
 # ---------------------------------------------------------------------------
@@ -457,6 +495,8 @@ class WorkflowState:
     review_status: Optional[str] = None   # "approved" | "changes_requested" | "pending" | None
     pr_target:     Optional[str] = None   # target branch (e.g. "acceptance", "production")
     jira_key:      Optional[str] = None
+    staleness_level: Optional[str] = None  # "slightly_stale" | "moderately_stale" | "very_stale"
+    pr_updated_at:   Optional[str] = None  # ISO 8601 from GitHub PR API
 
 
 # ---------------------------------------------------------------------------
@@ -814,7 +854,7 @@ class PRWorkflowPoller(WorkflowPoller):
     def __init__(self, wid, cfg_entry, config_mgr, event_queue):
         super().__init__(wid, cfg_entry, config_mgr, event_queue)
         self._max_prs = int(cfg_entry.get("max_prs", 5))
-        self._stale_after = int(cfg_entry.get("pr_stale_after", 300))
+        self._stale_after = parse_duration(cfg_entry.get("pr_stale_after", "5m"))
         # Extra workflow files to aggregate status from
         self._extra_wf_files: list[str] = list(cfg_entry.get("extra_workflows", []))
         # Per-branch tracking
@@ -829,6 +869,18 @@ class PRWorkflowPoller(WorkflowPoller):
         cfg   = self.config_mgr.get()
         token = cfg.get("github_token", "")
         notif_cfg = cfg.get("notifications", {})
+
+        # Staleness thresholds (sorted descending so highest is checked first)
+        stale_cfg = cfg.get("staleness_thresholds", {})
+        staleness_thresholds = sorted(
+            [
+                (parse_duration(stale_cfg.get("very_stale", "5d")), "very_stale"),
+                (parse_duration(stale_cfg.get("moderately_stale", "3d")), "moderately_stale"),
+                (parse_duration(stale_cfg.get("slightly_stale", "1d")), "slightly_stale"),
+            ],
+            key=lambda t: t[0],
+            reverse=True,
+        )
 
         # Resolve username
         try:
@@ -1041,6 +1093,20 @@ class PRWorkflowPoller(WorkflowPoller):
                     state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
                     state.review_status = self._fetch_pr_review_status(pr_num, token)
 
+                    # Compute PR staleness from updated_at
+                    updated_at_str = self._pr_cache.get(pr_num, {}).get("updated_at", "")
+                    if updated_at_str:
+                        state.pr_updated_at = updated_at_str
+                        try:
+                            updated_dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                            age_secs = (datetime.now(updated_dt.tzinfo) - updated_dt).total_seconds()
+                            for threshold_secs, level in staleness_thresholds:
+                                if age_secs >= threshold_secs:
+                                    state.staleness_level = level
+                                    break
+                        except Exception:
+                            pass
+
                 # Jira ticket key from branch name
                 state.jira_key = extract_jira_key(branch_name)
 
@@ -1110,6 +1176,7 @@ class PRWorkflowPoller(WorkflowPoller):
                     "draft": is_draft,
                     "title": title,
                     "base_ref": base_ref,
+                    "updated_at": pr.get("updated_at", ""),
                 }
                 results.append({"number": pr_num, "branch": branch, "base_ref": base_ref})
         return results
@@ -1157,6 +1224,7 @@ class PRWorkflowPoller(WorkflowPoller):
                         "draft": is_draft,
                         "title": title,
                         "base_ref": base_ref,
+                        "updated_at": pr.get("updated_at", ""),
                     }
                     results.append({"number": pr_num, "base_ref": base_ref})
             return results
@@ -1181,6 +1249,7 @@ class PRWorkflowPoller(WorkflowPoller):
                 "draft": is_draft,
                 "title": data.get("title", ""),
                 "base_ref": data.get("base", {}).get("ref", ""),
+                "updated_at": data.get("updated_at", ""),
             }
             return is_draft
         except Exception:
@@ -1238,7 +1307,7 @@ class ActorWorkflowPoller(WorkflowPoller):
         except ValueError:
             pass
         self._max_runs = int(cfg_entry.get("max_runs", 10))
-        self._stale_after = int(cfg_entry.get("stale_after", 300))
+        self._stale_after = parse_duration(cfg_entry.get("stale_after", "5m"))
         self._filter = cfg_entry.get("filter", "all")
         # Per-run tracking, keyed by composite "workflow_id:head_branch"
         self._prev_run_ids:     dict[str, int] = {}
@@ -1749,6 +1818,12 @@ class WorkflowRow:
             anchor="w", padx=3, pady=0,
         )
 
+        # Staleness badge (STALE 3d)
+        self._stale_lbl = tk.Label(
+            self._badge_row, text="", font=("Segoe UI", 7, "bold"),
+            anchor="w", padx=3, pady=0,
+        )
+
         # PR title (becomes the main title for PR-mode rows, opens PR page)
         self._pr_title_lbl = tk.Label(
             centre, text="", font=("Segoe UI", 9),
@@ -1866,6 +1941,20 @@ class WorkflowRow:
             else:
                 self._review_lbl.pack_forget()
 
+            if s.staleness_level and s.pr_updated_at:
+                _stale_cfg = {
+                    "slightly_stale":   ("#3D3520", "#EAB308"),
+                    "moderately_stale": ("#3A2A1C", "#F97316"),
+                    "very_stale":       ("#3A1C1C", "#EF4444"),
+                }
+                bg_col, fg_col = _stale_cfg.get(s.staleness_level, ("#3D3520", "#EAB308"))
+                age = _format_age(s.pr_updated_at)
+                self._stale_lbl.config(text=f"STALE {age}" if age else "STALE", bg=bg_col, fg=fg_col)
+                self._stale_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                has_badges = True
+            else:
+                self._stale_lbl.pack_forget()
+
             if has_badges:
                 self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
             else:
@@ -1878,6 +1967,7 @@ class WorkflowRow:
             self._draft_lbl.pack_forget()
             self._jira_lbl.pack_forget()
             self._review_lbl.pack_forget()
+            self._stale_lbl.pack_forget()
             self._pr_title_lbl.pack_forget()
             self._badge_row.pack_forget()
 
