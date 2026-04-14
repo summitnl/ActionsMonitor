@@ -3,6 +3,7 @@
 ### 2026-04-14
 
 - **PR staleness badge** — PR-mode rows now show a colour-escalating staleness badge (yellow/orange/red) based on how long since the PR was last updated. Thresholds are configurable with human-friendly durations (`"1d"`, `"3d"`, `"5d"`). New `parse_duration()` utility accepts `"30m"`, `"12h"`, `"2d12h"`, etc. — also used by `pr_stale_after` and `stale_after` which now accept the same format (plain integers still work).
+- **IN REVIEW badge** — review status now distinguishes between "no reviews" (REVIEW PENDING, amber) and "has review comments but no formal decision" (IN REVIEW, blue).
 - **Multiple PRs per branch** — PR-mode now shows separate rows when a branch has multiple PRs targeting different branches (e.g. `hotfix/fix-123 → acceptance` and `hotfix/fix-123 → production`). Each row displays its own target branch, PR number, draft status, review status, and build status independently.
 - **Reliable DRAFT badge** — draft status is now refreshed every poll cycle (previously cached forever). The badge has a new bold amber style for better visibility.
 - **Open PR discovery** — PR-mode now queries the GitHub Pulls API to find all your open PRs, ensuring that PRs with older CI runs (like long-lived drafts) still appear even when their workflow runs have fallen off the recent runs page. PR numbers, titles, and target branches are now reliably detected for all rows via the Pulls API fallback.

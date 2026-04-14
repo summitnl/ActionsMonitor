@@ -492,7 +492,7 @@ class WorkflowState:
     pr_title:      Optional[str] = None
     pr_url:        Optional[str] = None
     is_draft:      bool = False
-    review_status: Optional[str] = None   # "approved" | "changes_requested" | "pending" | None
+    review_status: Optional[str] = None   # "approved" | "changes_requested" | "commented" | "pending" | None
     pr_target:     Optional[str] = None   # target branch (e.g. "acceptance", "production")
     jira_key:      Optional[str] = None
     staleness_level: Optional[str] = None  # "slightly_stale" | "moderately_stale" | "very_stale"
@@ -1257,7 +1257,7 @@ class PRWorkflowPoller(WorkflowPoller):
 
     def _fetch_pr_review_status(self, pr_number: int, token: str) -> Optional[str]:
         """Fetch the aggregate review status for a PR.
-        Returns 'approved', 'changes_requested', 'pending', or None."""
+        Returns 'approved', 'changes_requested', 'commented', 'pending', or None."""
         try:
             url = (
                 f"https://api.github.com/repos/{self.owner}/{self.repo}"
@@ -1273,16 +1273,19 @@ class PRWorkflowPoller(WorkflowPoller):
             resp.raise_for_status()
             reviews = resp.json()
 
-            # Keep only the latest review per reviewer (ignore COMMENTED/PENDING)
+            # Keep only the latest review per reviewer (ignore PENDING/DISMISSED)
             latest: dict[str, str] = {}
+            has_comments = False
             for r in reviews:
                 user = r.get("user", {}).get("login", "")
                 state = r.get("state", "")
                 if state in ("APPROVED", "CHANGES_REQUESTED"):
                     latest[user] = state
+                elif state == "COMMENTED":
+                    has_comments = True
 
             if not latest:
-                return "pending"
+                return "commented" if has_comments else "pending"
             if "CHANGES_REQUESTED" in latest.values():
                 return "changes_requested"
             return "approved"
@@ -1930,6 +1933,7 @@ class WorkflowRow:
                 _review_cfg = {
                     "approved":          ("APPROVED",          "#1C3A2A", "#4ADE80"),
                     "changes_requested": ("CHANGES REQUESTED", "#3A1C1C", "#F87171"),
+                    "commented":         ("IN REVIEW",         "#1C2A3A", "#60A5FA"),
                     "pending":           ("REVIEW PENDING",    "#3D3530", "#FBBF24"),
                 }
                 text, bg_col, fg_col = _review_cfg.get(
