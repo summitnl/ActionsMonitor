@@ -17,6 +17,7 @@ import webbrowser
 import time
 import queue
 import subprocess
+import math
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -618,6 +619,7 @@ class NotificationManager:
                     title=title,
                     msg=message,
                     duration="short",
+                    icon=str(APP_ICO) if APP_ICO.exists() else "",
                 )
                 if url:
                     toast.add_actions(label="Open workflow", launch=url)
@@ -1528,6 +1530,33 @@ def _make_status_icon(status: str, size: int = 32) -> Image.Image:
     return func(size, bg_fill)
 
 
+# --- Refresh icon (Lucide rotate-cw) for header button ---
+
+def _make_refresh_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
+    """Lucide rotate-cw icon: circular arrow in the given colour."""
+    ss = 4
+    hi = size * ss
+    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    sw = max(3, round(hi / 16 * 2.2))
+    cx, cy = hi / 2, hi / 2
+    r = hi * 0.36
+    # Arc: nearly full circle, leave gap at top-right for arrowhead
+    draw.arc([cx - r, cy - r, cx + r, cy + r], start=-30, end=300,
+             fill=colour, width=sw)
+    # Arrowhead at the end of the arc (top-right, pointing clockwise)
+    angle = math.radians(-30)
+    ax = cx + r * math.cos(angle)
+    ay = cy + r * math.sin(angle)
+    arrow_len = hi * 0.18
+    draw.polygon([
+        (ax, ay),
+        (ax - arrow_len, ay - arrow_len * 0.15),
+        (ax - arrow_len * 0.15, ay - arrow_len),
+    ], fill=colour)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 # --- App / tray icon (play triangle on dark rounded rect + status dot) ---
 
 def _make_base_icon(size: int = 64) -> Image.Image:
@@ -2161,6 +2190,48 @@ def _rect_overlaps(
 
 
 # ---------------------------------------------------------------------------
+# Tooltip helper
+# ---------------------------------------------------------------------------
+def _attach_tooltip(widget: tk.Widget, text: str, delay: int = 400):
+    """Show a small tooltip after hovering for *delay* ms."""
+    tip: tk.Toplevel | None = None
+    after_id: str | None = None
+
+    def _show(e):
+        nonlocal tip, after_id
+        def _create():
+            nonlocal tip
+            tip = tk.Toplevel(widget)
+            tip.wm_overrideredirect(True)
+            lbl = tk.Label(tip, text=text, bg="#292524", fg=FG_TEXT,
+                           font=("Segoe UI", 8), padx=6, pady=3,
+                           relief="solid", borderwidth=1, highlightthickness=0)
+            lbl.pack()
+            tip.update_idletasks()
+            # Position below the widget, clamped to screen
+            wx = widget.winfo_rootx()
+            wy = widget.winfo_rooty() + widget.winfo_height() + 4
+            tw = tip.winfo_reqwidth()
+            sw = widget.winfo_screenwidth()
+            if wx + tw > sw:
+                wx = sw - tw - 4
+            tip.wm_geometry(f"+{wx}+{wy}")
+        after_id = widget.after(delay, _create)
+
+    def _hide(_e=None):
+        nonlocal tip, after_id
+        if after_id:
+            widget.after_cancel(after_id)
+            after_id = None
+        if tip:
+            tip.destroy()
+            tip = None
+
+    widget.bind("<Enter>", _show)
+    widget.bind("<Leave>", _hide)
+
+
+# ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
 class MainWindow:
@@ -2229,12 +2300,14 @@ class MainWindow:
             bg=BG_DARK, fg=FG_TEXT,
         ).pack(side=tk.LEFT, padx=16, pady=10)
 
+        self._refresh_icon = ImageTk.PhotoImage(_make_refresh_icon(24))
         refresh_btn = tk.Label(
-            header, text="Refresh", font=("Segoe UI", 9),
-            bg="#44403C", fg=FG_TEXT, padx=12, pady=4, cursor="hand2",
+            header, image=self._refresh_icon,
+            bg=BG_DARK, cursor="hand2", padx=8, pady=4,
         )
-        refresh_btn.pack(side=tk.RIGHT, padx=(0, 16), pady=8)
+        refresh_btn.pack(side=tk.RIGHT, padx=(0, 14), pady=8)
         refresh_btn.bind("<Button-1>", lambda _: self._refresh_all())
+        _attach_tooltip(refresh_btn, "Refresh all workflows")
 
         # Thin warm separator line under header
         tk.Frame(self._root, bg="#44403C", height=1).pack(fill=tk.X)

@@ -46,7 +46,7 @@ Everything lives in `src/main.py` — single-file application by design.
 
 The UI drains the queue via `root.after(500, _drain_queue)` — this is the only safe way to propagate poller results to tkinter widgets. Never call widget methods from poller threads directly.
 
-Pollers sleep between polls using a deadline loop that checks both `_stop_evt` and `_poll_now` events. The header **Refresh** button calls `_refresh_all()` which sets `_poll_now` on all pollers, waking them to re-poll immediately.
+Pollers sleep between polls using a deadline loop that checks both `_stop_evt` and `_poll_now` events. The header **Refresh** icon button calls `_refresh_all()` which sets `_poll_now` on all pollers, waking them to re-poll immediately.
 
 ### Data flow
 
@@ -99,7 +99,7 @@ ActorWorkflowPoller._poll()   # actor mode
 - **`WorkflowRow`** — auto-height tkinter widget with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
 - **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
-- **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers.
+- **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers. On Windows, winotify toasts include the app icon (`APP_ICO`).
 - **`UpdateChecker`** — on startup, compares local HEAD to `origin/main` via git. Skipped entirely when running as a frozen `.exe`.
 
 ### Composite keys
@@ -137,8 +137,13 @@ Lucide-inspired icons rendered with PIL at 4x supersampling + LANCZOS downscale.
 
 - `_make_base_icon(size)` — amber play triangle on warm dark rounded rect (supersampled)
 - `_make_icon_image(colour, size)` — base icon + coloured status dot (3-layer: dark outline → white ring → fill)
+- `_make_refresh_icon(size, colour)` — Lucide rotate-cw (circular arrow) for the header refresh button; defaults to `FG_LINK` (amber)
 - `_generate_app_ico()` — writes `app.ico` with embedded 16/32/48/256px sizes (largest first for proper ICO embedding); skips regeneration if `app.ico` already exists
 - Window icon set via both `iconbitmap` (`.ico` file) and `wm_iconphoto` (PIL images at multiple sizes)
+
+### Tooltips
+
+`_attach_tooltip(widget, text, delay)` adds a hover tooltip to any tkinter widget. The tooltip appears below the widget after a configurable delay (default 400ms), clamped to screen bounds so it never clips off-screen.
 
 ### Tray icon colour precedence
 

@@ -1,5 +1,10 @@
 # Changelog
 
+### 2026-04-14 (UI polish)
+
+- **Refresh icon button** — replaced the text "Refresh" button in the header with a Lucide-style rotate-cw icon, matching the app's visual language.
+- **Notification icon** — Windows toast notifications now display the app icon (amber play triangle) instead of a blank square.
+
 ### 2026-04-14 (code cleanup)
 
 - **Code cleanup** — removed unused imports (`field`, `tkfont`), dead `_prev_conclusion(s)` tracking variables, extracted `_gh_headers()` helper (replaced 9 inline header constructions), extracted `_resolve_status()` helper (replaced 3 duplicated status-mapping blocks), extracted `_cache_pr()` helper (replaced 3 identical PR cache update blocks), consolidated state file I/O into `_load_state()`/`_write_state()`/`_persist_collapsed()` helpers, fixed redundant `config_mgr.get()` call in `_add_poller()`, and skipped `_generate_app_ico()` when `app.ico` already exists.
