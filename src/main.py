@@ -123,6 +123,12 @@ ST_FAILURE    = "failure"
 ST_CANCELLED  = "cancelled"
 ST_SKIPPED    = "skipped"
 
+# Sort priority: higher = more urgent (used for status-based row sorting)
+_STATUS_PRIORITY = {
+    ST_FAILURE: 4, ST_RUNNING: 3, ST_QUEUED: 2, ST_SUCCESS: 1,
+    ST_UNKNOWN: 0, ST_CANCELLED: 0, ST_SKIPPED: 0,
+}
+
 # Colour palette — warm dark theme
 COLOUR = {
     ST_UNKNOWN:   "#A8A29E",  # warm grey (stone-400)
@@ -2301,6 +2307,8 @@ class MainWindow:
         self._section_content: dict[str, tk.Frame] = {}    # title → content frame
         self._section_indicators: dict[str, tk.Label] = {} # title → indicator label
         self._collapsed: dict[str, bool] = {}              # title → collapsed flag
+        self._section_sort: dict[str, Optional[str]] = {}  # title → sort mode or None
+        self._sort_labels: dict[str, dict[str, tk.Label]] = {}  # title → {key: label}
 
         self._root = tk.Tk()
         self._root.title(APP_NAME)
@@ -2500,7 +2508,29 @@ class MainWindow:
             content.pack(fill=tk.X)
         self._section_content[title] = content
 
-        # Bind click on all header widgets
+        # Sort bar — inside content, above the rows
+        sort_bar = tk.Frame(content, bg=BG_ROW)
+        sort_bar.pack(fill=tk.X, padx=4, pady=(2, 0))
+
+        tk.Label(sort_bar, text="SORT:", font=("Segoe UI", 8, "bold"),
+                 bg=BG_ROW, fg=FG_TEXT, padx=6, pady=3).pack(side=tk.LEFT)
+
+        labels: dict[str, tk.Label] = {}
+        for sk in ("status", "updated", "created"):
+            lbl = tk.Label(sort_bar, text=f"{sk.capitalize()} ·", font=("Segoe UI", 8),
+                           bg=BG_ROW, fg=FG_MUTED, cursor="hand2", padx=6, pady=3)
+            lbl.pack(side=tk.LEFT)
+            lbl.bind("<Button-1>", lambda _e, t=title, k=sk: self._cycle_sort(t, k))
+            labels[sk] = lbl
+        self._sort_labels[title] = labels
+
+        # Clear button
+        clear_lbl = tk.Label(sort_bar, text="✕", font=("Segoe UI", 8),
+                             bg=BG_ROW, fg=FG_MUTED, cursor="hand2", padx=8, pady=3)
+        clear_lbl.pack(side=tk.RIGHT)
+        clear_lbl.bind("<Button-1>", lambda _e, t=title: self._clear_sort(t))
+
+        # Bind click on all header widgets (collapse/expand)
         def toggle(_e=None, t=title):
             self._toggle_section(t)
         for widget in (hdr, indicator, title_lbl, sep):
@@ -2535,6 +2565,153 @@ class MainWindow:
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # Section sorting
+    # ------------------------------------------------------------------
+    _SORT_KEYS = ("status", "updated", "created")
+
+    def _cycle_sort(self, title: str, sort_key: str):
+        """Cycle sort for a section+key: None → asc → desc → None. Only one sort active globally."""
+        current = self._section_sort.get(title)
+        prefix = f"{sort_key}_"
+
+        # Determine next state for this key
+        if current == f"{prefix}asc":
+            new_sort = f"{prefix}desc"
+        elif current == f"{prefix}desc":
+            new_sort = None
+        elif current is None or not current.startswith(prefix):
+            new_sort = f"{prefix}asc"
+        else:
+            new_sort = None
+
+        # Clear all other sorts globally (only one active at a time)
+        prev_sorted_titles = [t for t, s in self._section_sort.items() if s is not None and t != title]
+        for t in self._section_sort:
+            self._section_sort[t] = None
+        self._section_sort[title] = new_sort
+
+        self._update_sort_labels()
+
+        # Re-sort affected sections
+        self._sort_section(title)
+        for t in prev_sorted_titles:
+            self._sort_section(t)
+
+        self._save_sort_state()
+
+    def _sort_section(self, title: str):
+        """Re-order rows within a section based on the active sort."""
+        content = self._section_content.get(title)
+        if not content:
+            return
+        sort_mode = self._section_sort.get(title)
+
+        # Collect rows belonging to this section
+        section_rows: list[tuple[tuple[int, Optional[str]], WorkflowRow]] = []
+        for key, row in self._rows.items():
+            wid = key[0]
+            if self._wid_container.get(wid) is content:
+                section_rows.append((key, row))
+
+        if not section_rows:
+            return
+
+        # Sort
+        if sort_mode == "status_asc":
+            section_rows.sort(key=lambda kr: _STATUS_PRIORITY.get(
+                self._states.get(kr[0], WorkflowState(name="", url="", branch=None)).status, 0), reverse=True)
+        elif sort_mode == "status_desc":
+            section_rows.sort(key=lambda kr: _STATUS_PRIORITY.get(
+                self._states.get(kr[0], WorkflowState(name="", url="", branch=None)).status, 0))
+        elif sort_mode in ("updated_asc", "updated_desc"):
+            def _updated_key(kr):
+                s = self._states.get(kr[0])
+                ts = (s.run_updated_at or s.started_at or "") if s else ""
+                return ts
+            section_rows.sort(key=_updated_key, reverse=(sort_mode == "updated_asc"))
+        elif sort_mode in ("created_asc", "created_desc"):
+            def _created_key(kr):
+                s = self._states.get(kr[0])
+                return (s.started_at or "") if s else ""
+            section_rows.sort(key=_created_key, reverse=(sort_mode == "created_asc"))
+        else:
+            # Default: insertion order (sort by key tuple)
+            section_rows.sort(key=lambda kr: (kr[0][0], kr[0][1] or ""))
+
+        # Re-pack in new order
+        for _key, row in section_rows:
+            row.frame.pack_forget()
+        for i, (_key, row) in enumerate(section_rows):
+            row.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
+            bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
+            row._bg = bg
+            row.frame.config(bg=bg)
+            for widget in row.frame.winfo_children():
+                if widget is row._accent:
+                    continue
+                try:
+                    widget.config(bg=bg)
+                except tk.TclError:
+                    pass
+                if isinstance(widget, tk.Frame):
+                    for child in widget.winfo_children():
+                        try:
+                            child.config(bg=bg)
+                        except tk.TclError:
+                            pass
+
+    def _update_sort_labels(self):
+        """Refresh all sort label text and colors to reflect current state."""
+        _ARROWS = {"asc": "▲", "desc": "▼"}
+        for title, labels in self._sort_labels.items():
+            current = self._section_sort.get(title)
+            for sk, lbl in labels.items():
+                if current and current.startswith(f"{sk}_"):
+                    direction = current.split("_", 1)[1]
+                    lbl.config(text=f"{sk.capitalize()} {_ARROWS[direction]}", fg=FG_LINK)
+                else:
+                    lbl.config(text=f"{sk.capitalize()} ·", fg=FG_MUTED)
+
+    def _clear_sort(self, title: str):
+        """Clear sorting for a section and restore default order."""
+        if not self._section_sort.get(title):
+            return
+        self._section_sort[title] = None
+        self._update_sort_labels()
+        self._sort_section(title)
+        self._save_sort_state()
+
+    def _save_sort_state(self):
+        """Persist section sort preferences to state.json."""
+        try:
+            state = self._load_state()
+            sorts = {t: s for t, s in self._section_sort.items() if s is not None}
+            if sorts:
+                state["section_sort"] = sorts
+            else:
+                state.pop("section_sort", None)
+            self._write_state(state)
+        except Exception:
+            pass
+
+    def _restore_sort_state(self):
+        """Restore section sort preferences from state.json."""
+        state = self._load_state()
+        for title, sort_mode in state.get("section_sort", {}).items():
+            self._section_sort[title] = sort_mode
+        self._update_sort_labels()
+
+    def _resort_section_for_wid(self, wid: int):
+        """Re-sort the section containing the given workflow id, if it has an active sort."""
+        container = self._wid_container.get(wid)
+        if not container:
+            return
+        for title, content in self._section_content.items():
+            if content is container and self._section_sort.get(title):
+                self._sort_section(title)
+                break
+
     def _destroy_sections(self):
         for sec in self._sections:
             sec.destroy()
@@ -2542,6 +2719,7 @@ class MainWindow:
         self._wid_container.clear()
         self._section_content.clear()
         self._section_indicators.clear()
+        self._sort_labels.clear()
 
     # ------------------------------------------------------------------
     # Pollers
@@ -2564,6 +2742,8 @@ class MainWindow:
                     branch_container = self._create_section("Workflows")
                 container = branch_container
             self._wid_container[wid] = container
+
+        self._restore_sort_state()
 
         for wid, entry in enumerate(workflows):
             self._add_poller(wid, entry, cfg)
@@ -2646,6 +2826,7 @@ class MainWindow:
                 row.frame.destroy()
             self._states.pop(key, None)
             self._restripe_rows()
+            self._resort_section_for_wid(event.workflow_id)
         else:
             self._states[key] = event.new_state
             row = self._rows.get(key)
@@ -2659,6 +2840,7 @@ class MainWindow:
                                       jira_base_url=jira_url)
                 new_row.update(event.new_state, poll_rate, jira_base_url=jira_url)
                 self._rows[key] = new_row
+            self._resort_section_for_wid(event.workflow_id)
 
         if self._tray:
             self._tray.update(list(self._states.values()))
@@ -2738,6 +2920,12 @@ class MainWindow:
                 "height": self._root.winfo_height(),
             }
             self._persist_collapsed(state)
+            # Persist sort state
+            sorts = {t: s for t, s in self._section_sort.items() if s is not None}
+            if sorts:
+                state["section_sort"] = sorts
+            else:
+                state.pop("section_sort", None)
             self._write_state(state)
         except Exception as exc:
             print(f"[State] Save error: {exc}")

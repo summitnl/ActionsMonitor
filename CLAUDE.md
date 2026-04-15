@@ -108,6 +108,10 @@ ActorWorkflowPoller._poll()   # actor mode
 
 `MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows, `branch#pr_num` for PR-mode rows (or just `branch` when no PR is detected), and a composite string for actor-mode rows. This allows multiple dynamic rows per poller, including multiple PRs from the same branch.
 
+### Section sorting
+
+Each section header has clickable Status/Updated/Created sort labels. `_section_sort[title]` stores the active sort mode (`"status_asc"`, `"updated_desc"`, etc. or `None`). Only one sort is active globally — `_cycle_sort()` clears all others before setting the new one. `_sort_section()` collects rows for a section, sorts them, and re-packs. `_STATUS_PRIORITY` (module-level) maps status constants to numeric priority. Sort state persists in `state.json` under `"section_sort"`. After row creation/removal, `_resort_section_for_wid()` triggers re-sort if the section has an active sort.
+
 ## Visual system
 
 ### Colour palette
