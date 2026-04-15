@@ -5,10 +5,14 @@ Copyright (c) 2026 Summit (https://summit.nl)
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to use,
 copy, modify, merge, publish, distribute, and/or sublicense the Software,
-subject to the following condition:
+subject to the following conditions:
 
-  The NOTICE file included with the Software must be retained in all copies,
-  forks, and derivative works, in both source and binary distributions.
+  1. The NOTICE file included with the Software must be retained in all copies,
+     forks, and derivative works, in both source and binary distributions.
+
+  2. The Software, or any derivative work thereof, may not be sold, offered for
+     sale, or otherwise commercially distributed for a fee, whether as a
+     standalone product or as part of a bundle.
 
 THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
