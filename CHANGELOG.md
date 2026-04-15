@@ -2,6 +2,7 @@
 
 ### 2026-04-15
 
+- **Notification click brings window to foreground** — clicking a toast notification body now raises the app window and blinks the relevant row(s) with a brief amber flash animation (3 cycles, 900ms). The "Open workflow" action button keeps its existing behavior. Uses a VBScript signal file mechanism for silent IPC between the notification click and the running app.
 - **Stale notification suppression** — notifications older than `max_notification_age` (default `"1h"`) are now silently dropped. Prevents a flood of stale toasts after waking from sleep. For `new_run` notifications the run's start time is checked; for `success`/`failure` the run's last update time is used (so long-running jobs that just completed still notify). Configurable under `notifications.max_notification_age` using duration strings (`"30m"`, `"2h"`, etc.) or `0` to disable.
 
 ### 2026-04-14 (UI polish)

@@ -11,6 +11,10 @@ __pycache__/
 .venv/
 venv/
 
+# Notification focus signal files
+_focus.vbs
+_focus_signal
+
 # PyInstaller build artifacts
 build/
 dist/

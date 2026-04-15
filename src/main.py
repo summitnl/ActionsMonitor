@@ -97,9 +97,20 @@ if getattr(sys, "frozen", False):
 else:
     _APP_DIR = Path(__file__).resolve().parent.parent
 
-CONFIG_FILE = _APP_DIR / "config.yaml"
-STATE_FILE  = _APP_DIR / "state.json"
-APP_ICO     = _APP_DIR / "app.ico"
+CONFIG_FILE    = _APP_DIR / "config.yaml"
+STATE_FILE     = _APP_DIR / "state.json"
+APP_ICO        = _APP_DIR / "app.ico"
+_FOCUS_VBS     = _APP_DIR / "_focus.vbs"
+_FOCUS_SIGNAL  = _APP_DIR / "_focus_signal"
+
+
+def _ensure_focus_vbs():
+    """Create a small VBScript that writes a signal file when executed (silent, no CMD flash)."""
+    script = (
+        'Set fso = CreateObject("Scripting.FileSystemObject")\n'
+        f'fso.CreateTextFile "{_FOCUS_SIGNAL}", True\n'
+    )
+    _FOCUS_VBS.write_text(script, encoding="utf-8")
 
 POLL_DEFAULT = 60  # seconds
 
@@ -525,6 +536,7 @@ class _PendingNotification:
     message:    str
     sound_cfg:  str
     url:        Optional[str]
+    row_keys:   list[tuple[int, Optional[str]]]
 
 
 class NotificationManager:
@@ -533,23 +545,32 @@ class NotificationManager:
         self._pending: list[_PendingNotification] = []
         self._flush_timer: Optional[threading.Timer] = None
         self._batch_window: float = 3.0
+        self._recently_notified: set[tuple[int, Optional[str]]] = set()
+        self._notified_lock = threading.Lock()
 
     def set_batch_window(self, seconds: float):
         with self._lock:
             self._batch_window = max(seconds, 0.0)
 
+    def drain_recently_notified(self) -> set[tuple[int, Optional[str]]]:
+        with self._notified_lock:
+            result = set(self._recently_notified)
+            self._recently_notified.clear()
+            return result
+
     def notify(self, title: str, message: str, sound_cfg: str,
-               url: Optional[str] = None, notif_type: str = "new_run"):
+               url: Optional[str] = None, notif_type: str = "new_run",
+               row_keys: Optional[list[tuple[int, Optional[str]]]] = None):
         with self._lock:
             if self._batch_window <= 0:
                 # Batching disabled — fire immediately (old behaviour)
                 threading.Thread(
                     target=self._send,
-                    args=(title, message, sound_cfg, url),
+                    args=(title, message, sound_cfg, url, row_keys or []),
                     daemon=True,
                 ).start()
                 return
-            self._pending.append(_PendingNotification(notif_type, title, message, sound_cfg, url))
+            self._pending.append(_PendingNotification(notif_type, title, message, sound_cfg, url, row_keys or []))
             if self._flush_timer is None:
                 self._flush_timer = threading.Timer(self._batch_window, self._flush)
                 self._flush_timer.daemon = True
@@ -569,7 +590,7 @@ class NotificationManager:
             item = batch[0]
             threading.Thread(
                 target=self._send,
-                args=(item.title, item.message, item.sound_cfg, item.url),
+                args=(item.title, item.message, item.sound_cfg, item.url, item.row_keys),
                 daemon=True,
             ).start()
             return
@@ -605,14 +626,25 @@ class NotificationManager:
         if url is None:
             url = batch[0].url
 
+        # Collect all row keys from batched notifications
+        all_keys: list[tuple[int, Optional[str]]] = []
+        for item in batch:
+            all_keys.extend(item.row_keys)
+
         threading.Thread(
             target=self._send,
-            args=(title, body, sound, url),
+            args=(title, body, sound, url, all_keys),
             daemon=True,
         ).start()
 
     # -- low-level send / sound ----------------------------------------------
-    def _send(self, title: str, message: str, sound_cfg: str, url: Optional[str] = None):
+    def _send(self, title: str, message: str, sound_cfg: str,
+              url: Optional[str] = None,
+              row_keys: Optional[list[tuple[int, Optional[str]]]] = None):
+        # Record which rows were notified (for blink-on-focus)
+        if row_keys:
+            with self._notified_lock:
+                self._recently_notified.update(row_keys)
         sound_coupled = False
         if IS_WINDOWS and WINOTIFY_AVAILABLE:
             try:
@@ -622,6 +654,7 @@ class NotificationManager:
                     msg=message,
                     duration="short",
                     icon=str(APP_ICO) if APP_ICO.exists() else "",
+                    launch=str(_FOCUS_VBS) if _FOCUS_VBS.exists() else "",
                 )
                 if url:
                     toast.add_actions(label="Open workflow", launch=url)
@@ -814,7 +847,8 @@ class WorkflowPoller(threading.Thread):
         if notif_type:
             self._fire_notification(notif_type, state, notif_cfg)
 
-    def _fire_notification(self, notif_type: str, state: WorkflowState, global_notif: dict, is_pr: bool = False):
+    def _fire_notification(self, notif_type: str, state: WorkflowState, global_notif: dict,
+                           is_pr: bool = False, sub_key: Optional[str] = None):
         # Suppress stale notifications (e.g. after waking from sleep)
         max_age = parse_duration(global_notif.get("max_notification_age", "1h"))
         if max_age > 0:
@@ -851,7 +885,8 @@ class WorkflowPoller(threading.Thread):
             "failure": f"{state.name}  •  Run #{state.run_number}",
         }
         url = state.run_url or state.url
-        NOTIF.notify(titles[notif_type], messages[notif_type], sound, url=url, notif_type=notif_type)
+        NOTIF.notify(titles[notif_type], messages[notif_type], sound, url=url, notif_type=notif_type,
+                     row_keys=[(self.wid, sub_key)])
 
 
 # ---------------------------------------------------------------------------
@@ -1141,7 +1176,7 @@ class PRWorkflowPoller(WorkflowPoller):
                 self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=sub_key))
 
                 if notif_type:
-                    self._fire_notification(notif_type, state, notif_cfg, is_pr=True)
+                    self._fire_notification(notif_type, state, notif_cfg, is_pr=True, sub_key=sub_key)
 
         # Detect stale sub_keys
         for sk in list(self._last_seen.keys()):
@@ -1394,7 +1429,7 @@ class ActorWorkflowPoller(WorkflowPoller):
             self.event_queue.put(StatusEvent(self.wid, state, notif_type, sub_key=composite_key))
 
             if notif_type:
-                self._fire_notification(notif_type, state, notif_cfg, is_pr=False)
+                self._fire_notification(notif_type, state, notif_cfg, is_pr=False, sub_key=composite_key)
 
         # Detect stale entries
         for key in list(self._last_seen.keys()):
@@ -2593,8 +2628,8 @@ class MainWindow:
                 self._apply_event(event)
         except queue.Empty:
             pass
-        finally:
-            self._root.after(500, self._drain_queue)
+        self._check_focus_signal()
+        self._root.after(500, self._drain_queue)
 
     def _apply_event(self, event: StatusEvent):
         key = (event.workflow_id, event.sub_key)
@@ -2756,6 +2791,49 @@ class MainWindow:
         self._root.lift()
         self._root.focus_force()
 
+    def _check_focus_signal(self):
+        if not _FOCUS_SIGNAL.exists():
+            return
+        try:
+            _FOCUS_SIGNAL.unlink()
+        except OSError:
+            return
+        self._show_window()
+        recently = NOTIF.drain_recently_notified()
+        for key in recently:
+            row = self._rows.get(key)
+            if row:
+                self._blink_row(row)
+
+    _BLINK_COLOR = "#4A3728"
+    _BLINK_STEPS = 6       # 3 on/off cycles
+    _BLINK_MS    = 150
+
+    def _blink_row(self, row, remaining: int = _BLINK_STEPS):
+        if remaining <= 0:
+            self._set_row_bg(row, row._bg)
+            return
+        color = self._BLINK_COLOR if remaining % 2 == 0 else row._bg
+        self._set_row_bg(row, color)
+        self._root.after(self._BLINK_MS, self._blink_row, row, remaining - 1)
+
+    @staticmethod
+    def _set_row_bg(row, color: str):
+        row.frame.config(bg=color)
+        for widget in row.frame.winfo_children():
+            if widget is row._accent:
+                continue
+            try:
+                widget.config(bg=color)
+            except tk.TclError:
+                pass
+            if isinstance(widget, tk.Frame):
+                for child in widget.winfo_children():
+                    try:
+                        child.config(bg=color)
+                    except tk.TclError:
+                        pass
+
     def _on_unmap(self, event):
         if event.widget is self._root:
             self._root.withdraw()
@@ -2765,6 +2843,11 @@ class MainWindow:
         self._stop_all_pollers()
         if self._tray:
             self._tray.stop()
+        for f in (_FOCUS_SIGNAL, _FOCUS_VBS):
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
         self._root.destroy()
 
     def run(self):
@@ -2784,6 +2867,7 @@ class MainWindow:
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
+    _ensure_focus_vbs()
     config_mgr  = ConfigManager()
 
     # Check for updates before starting the main UI

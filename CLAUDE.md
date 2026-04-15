@@ -33,6 +33,8 @@ Everything lives in `src/main.py` — single-file application by design.
 | `config.yaml` | User config (token, workflows) — hot-reloaded every 5s via mtime | Yes |
 | `config.template.yaml` | Checked-in template with documentation | No |
 | `state.json` | Window position/size persistence | Yes |
+| `_focus.vbs` | VBScript that creates signal file on notification body click | Yes |
+| `_focus_signal` | Transient signal file — triggers window raise + row blink | Yes |
 | `app.ico` | Generated multi-size icon (16/32/48/256) | No |
 
 ### Threading model
@@ -99,7 +101,7 @@ ActorWorkflowPoller._poll()   # actor mode
 - **`WorkflowRow`** — auto-height tkinter widget with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
 - **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
-- **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers. On Windows, winotify toasts include the app icon (`APP_ICO`).
+- **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers. On Windows, winotify toasts include the app icon (`APP_ICO`). Tracks recently notified `(wid, sub_key)` tuples via `_recently_notified` for blink-on-focus. Toast body `launch` points to `_focus.vbs` which creates `_focus_signal`; the main loop polls for this file and calls `_show_window()` + `_blink_row()` on matching rows.
 - **`UpdateChecker`** — on startup, compares local HEAD to `origin/main` via git. Skipped entirely when running as a frozen `.exe`.
 
 ### Composite keys
