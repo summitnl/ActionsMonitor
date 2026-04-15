@@ -106,6 +106,91 @@ if getattr(sys, "frozen", False):
 else:
     _APP_DIR = Path(__file__).resolve().parent.parent
 
+# Summit logo (docs/summit.png exported at 56px height, base64-encoded to avoid bundling issues)
+_SUMMIT_LOGO_B64 = (
+    "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"
+)
+
 CONFIG_FILE    = _APP_DIR / "config.yaml"
 STATE_FILE     = _APP_DIR / "state.json"
 APP_ICO        = _APP_DIR / "app.ico"
@@ -2458,10 +2543,28 @@ class MainWindow:
         header = tk.Frame(self._root, bg=BG_DARK, height=46)
         header.pack(fill=tk.X)
         header.pack_propagate(False)
+
+        # Summit logo
+        import base64, io
+        logo_data = base64.b64decode(_SUMMIT_LOGO_B64)
+        logo_img = Image.open(io.BytesIO(logo_data))
+        # Scale to 28px height for the header
+        scale = 28 / logo_img.height
+        logo_img = logo_img.resize(
+            (round(logo_img.width * scale), 28), Image.LANCZOS,
+        )
+        self._summit_logo = ImageTk.PhotoImage(logo_img)
+        logo_lbl = tk.Label(
+            header, image=self._summit_logo, bg=BG_DARK, cursor="hand2",
+        )
+        logo_lbl.pack(side=tk.LEFT, padx=(14, 0), pady=9)
+        logo_lbl.bind("<Button-1>", lambda _: webbrowser.open("https://summit.nl"))
+        _attach_tooltip(logo_lbl, "summit.nl")
+
         tk.Label(
             header, text=APP_NAME, font=("Segoe UI", 12),
             bg=BG_DARK, fg=FG_TEXT,
-        ).pack(side=tk.LEFT, padx=16, pady=10)
+        ).pack(side=tk.LEFT, padx=(10, 16), pady=10)
 
         self._refresh_icon = ImageTk.PhotoImage(_make_refresh_icon(24))
         refresh_btn = tk.Label(
