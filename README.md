@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/summit.svg" alt="Summit" height="35">
+</p>
+
 # Actions Monitor
 
 A lightweight tray application that monitors GitHub Actions workflow statuses and notifies you when something changes. Runs on Windows and Linux.
@@ -181,7 +185,12 @@ If you used the development setup, run `src\dev-uninstall.bat` to also remove th
 
 ## Updating
 
-The app checks for updates automatically on startup (when running from source). If a new version is available, a dialog offers to pull and restart for you.
+The app checks for updates automatically on startup:
 
-For the exe, download the latest `ActionsMonitor.exe` and replace the old one.
+- **Binary builds** check GitHub Releases for a newer version. If found, a dialog offers to download and install the update in-place.
+- **Running from source** uses `git fetch` to detect new commits. If behind, a dialog offers to pull and restart.
+
+## License
+
+This project is licensed under the [Summit Free Use License](LICENSE). All copies and forks must retain the [NOTICE](NOTICE) file.
 
