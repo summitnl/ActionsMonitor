@@ -196,6 +196,7 @@ DEFAULT_CONFIG: dict = {
     "github_token": "",
     "notifications": {
         "batch_window": 3,
+        "max_notification_age": "1h",
         "new_run":  {"enabled": True,  "sound": "whistle"},
         "failure":  {"enabled": True,  "sound": "default"},
         "success":  {"enabled": True,  "sound": "none"},
@@ -481,6 +482,7 @@ class WorkflowState:
     run_url:     Optional[str] = None
     run_number:  Optional[int] = None
     started_at:  Optional[str] = None
+    run_updated_at: Optional[str] = None  # ISO 8601 from GitHub run API (last status change)
     conclusion:  Optional[str] = None
     last_check:  Optional[datetime] = None
     error:       Optional[str] = None
@@ -786,6 +788,7 @@ class WorkflowPoller(threading.Thread):
         state.run_url   = run.get("html_url")
         state.run_number = run.get("run_number")
         state.started_at = run.get("run_started_at") or run.get("created_at")
+        state.run_updated_at = run.get("updated_at")
         state.conclusion = conclusion
 
         # Determine what notification to send
@@ -812,6 +815,20 @@ class WorkflowPoller(threading.Thread):
             self._fire_notification(notif_type, state, notif_cfg)
 
     def _fire_notification(self, notif_type: str, state: WorkflowState, global_notif: dict, is_pr: bool = False):
+        # Suppress stale notifications (e.g. after waking from sleep)
+        max_age = parse_duration(global_notif.get("max_notification_age", "1h"))
+        if max_age > 0:
+            # For new_run use started_at; for success/failure use run_updated_at (completion time)
+            ts = state.started_at if notif_type == "new_run" else (state.run_updated_at or state.started_at)
+            if ts:
+                try:
+                    dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    age = (datetime.now(dt.tzinfo) - dt).total_seconds()
+                    if age > max_age:
+                        return
+                except Exception:
+                    pass
+
         # Merge chain: global → (pr override) → per-workflow
         base = global_notif.get(notif_type, {})
         if is_pr:
@@ -1066,6 +1083,7 @@ class PRWorkflowPoller(WorkflowPoller):
                 state.run_url    = run.get("html_url")
                 state.run_number = run.get("run_number")
                 state.started_at = run.get("run_started_at") or run.get("created_at")
+                state.run_updated_at = run.get("updated_at")
                 state.conclusion = run.get("conclusion")
 
                 # Parse branch prefix
@@ -1344,6 +1362,7 @@ class ActorWorkflowPoller(WorkflowPoller):
             state.run_url    = run.get("html_url")
             state.run_number = run.get("run_number")
             state.started_at = run.get("run_started_at") or run.get("created_at")
+            state.run_updated_at = run.get("updated_at")
             state.conclusion = conclusion
 
             # Parse branch prefix

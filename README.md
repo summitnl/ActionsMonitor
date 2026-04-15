@@ -2,9 +2,9 @@
 
 A lightweight Windows tray application that monitors GitHub Actions workflow statuses and notifies you when something changes.
 
-![Application window](docs/application.png)
+> See the [Changelog](CHANGELOG.md) for updates.
 
-## [Changelog](CHANGELOG.md)
+![Application window](docs/application.png)
 
 ## Features
 

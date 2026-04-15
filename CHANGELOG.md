@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-04-15
+
+- **Stale notification suppression** — notifications older than `max_notification_age` (default `"1h"`) are now silently dropped. Prevents a flood of stale toasts after waking from sleep. For `new_run` notifications the run's start time is checked; for `success`/`failure` the run's last update time is used (so long-running jobs that just completed still notify). Configurable under `notifications.max_notification_age` using duration strings (`"30m"`, `"2h"`, etc.) or `0` to disable.
+
 ### 2026-04-14 (UI polish)
 
 - **Refresh icon button** — replaced the text "Refresh" button in the header with a Lucide-style rotate-cw icon, matching the app's visual language.

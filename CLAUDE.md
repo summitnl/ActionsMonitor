@@ -178,7 +178,7 @@ PR-mode:     global[type] → global.pr[type] → per-workflow[type] → final
 
 ### Duration parsing
 
-`parse_duration()` converts human-friendly duration strings (`"30m"`, `"12h"`, `"1d"`, `"2d12h"`) to seconds. Also accepts plain integers for backward compatibility. Used by `staleness_thresholds`, `pr_stale_after`, and `stale_after`. When adding new time-based config values, prefer this over raw seconds.
+`parse_duration()` converts human-friendly duration strings (`"30m"`, `"12h"`, `"1d"`, `"2d12h"`) to seconds. Also accepts plain integers for backward compatibility. Used by `staleness_thresholds`, `pr_stale_after`, `stale_after`, and `max_notification_age`. When adding new time-based config values, prefer this over raw seconds.
 
 ### Staleness thresholds
 

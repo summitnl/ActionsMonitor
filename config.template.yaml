@@ -42,6 +42,11 @@ notifications:
   # combined into one toast + sound. Set to 0 to disable (immediate, old behavior).
   batch_window: 3
 
+  # Suppress notifications older than this duration. Prevents a flood of stale
+  # notifications after waking from sleep. Use duration strings like "1h", "30m",
+  # "2h", etc. Set to 0 to disable (never suppress).
+  max_notification_age: "1h"
+
   # Notify when a new workflow run starts
   new_run:
     enabled: true
