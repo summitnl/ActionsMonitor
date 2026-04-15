@@ -1,6 +1,6 @@
 # Actions Monitor
 
-A lightweight Windows tray application that monitors GitHub Actions workflow statuses and notifies you when something changes.
+A lightweight tray application that monitors GitHub Actions workflow statuses and notifies you when something changes. Runs on Windows and Linux.
 
 > See the [Changelog](CHANGELOG.md) for updates.
 
@@ -20,33 +20,51 @@ A lightweight Windows tray application that monitors GitHub Actions workflow sta
 
 ## Requirements
 
-- Windows 10 / 11 (Linux works too, without the toast button feature)
+- **Windows** 10 / 11
+- **Linux** with GTK3 (Ubuntu 22.04+, Fedora, etc.) — tray icon requires `gir1.2-ayatanaappindicator3-0.1`
 
 ## Getting started
+
+### Windows
 
 1. Run `ActionsMonitor.exe` — on first launch it creates `config.yaml` from the template
 2. Add your GitHub token and workflows (see [Configuration](#configuration) below)
 3. The app hot-reloads the config, no restart needed
 
+### Linux
+
+1. Run `./ActionsMonitor-linux` — on first launch it creates `config.yaml` from the template
+2. Add your GitHub token and workflows (see [Configuration](#configuration) below)
+3. The app hot-reloads the config, no restart needed
+
+> **Note:** On Linux, named notification sounds (`whistle`, `reminder`, etc.) are Windows-only. Use `"default"` for a system sound via paplay/aplay, or provide a path to an `.oga`/`.wav` file.
+
 ### Development setup
 
-If you want to run from source instead of the exe:
+If you want to run from source instead of the binary:
 
-```
+```bash
+# Windows
 src\dev-install.bat
+
+# Linux
+pip3 install -r src/requirements.txt
+sudo apt-get install -y python3-tk gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+python3 src/main.py
 ```
 
-Installs Python dependencies and creates `config.yaml` from the template.
-
-### Building the `.exe` from source
+### Building from source
 
 Requires Python 3.10+ with dependencies installed (`pip install -r src/requirements.txt`).
 
-```
+```bash
+# Windows — produces ActionsMonitor.exe
 src\build.bat
-```
 
-Produces `ActionsMonitor.exe` in the project root.
+# Linux — produces ActionsMonitor-linux
+pyinstaller --onefile --name ActionsMonitor-linux --add-data "config.template.yaml:." src/main.py
+cp dist/ActionsMonitor-linux .
+```
 
 ## Configuration
 

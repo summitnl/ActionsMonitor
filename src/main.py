@@ -6,7 +6,10 @@ Actions Monitor — Lightweight GitHub Actions workflow status monitor.
 from __future__ import annotations
 
 import ctypes
-import ctypes.wintypes
+try:
+    import ctypes.wintypes  # Windows-only; used by _get_monitor_work_areas()
+except (ImportError, ValueError):
+    pass
 import json
 import os
 import shutil
@@ -2121,7 +2124,7 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
     """Show a modal dark-themed update dialog."""
     dlg = tk.Toplevel(root)
     dlg.title(f"{APP_NAME} — Update Available")
-    if APP_ICO.exists():
+    if APP_ICO.exists() and IS_WINDOWS:
         dlg.iconbitmap(str(APP_ICO))
     dlg.configure(bg=BG_DARK)
     dlg.resizable(False, False)
@@ -2313,7 +2316,7 @@ class MainWindow:
         self._root = tk.Tk()
         self._root.title(APP_NAME)
         _generate_app_ico()
-        if APP_ICO.exists():
+        if APP_ICO.exists() and IS_WINDOWS:
             self._root.iconbitmap(str(APP_ICO))
         # Also set via iconphoto for taskbar/alt-tab on Windows
         try:
@@ -3055,7 +3058,8 @@ class MainWindow:
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
-    _ensure_focus_vbs()
+    if IS_WINDOWS:
+        _ensure_focus_vbs()
     config_mgr  = ConfigManager()
 
     # Check for updates before starting the main UI

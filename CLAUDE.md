@@ -212,4 +212,18 @@ When adding features, always add a dated changelog entry to `CHANGELOG.md`. Do n
 
 ### Building
 
-`src\build.bat` runs PyInstaller to produce `ActionsMonitor.exe` in the project root. Build artifacts (`build/`, `*.spec`, `*.exe`) are gitignored.
+**Windows:** `src\build.bat` runs PyInstaller to produce `ActionsMonitor.exe` in the project root. Build artifacts (`build/`, `*.spec`, `*.exe`) are gitignored.
+
+**Linux:** Build via WSL (Ubuntu-24.04). The Windows filesystem (`/mnt/c`) has permission issues with PyInstaller, so copy to `/tmp` first:
+
+```bash
+wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/Summit/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onefile --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && cp /tmp/am-build/dist/ActionsMonitor-linux /mnt/c/Repos/Summit/ActionsMonitor/ && rm -rf /tmp/am-build"
+```
+
+**Prerequisites (Ubuntu 24.04):**
+```bash
+sudo apt-get install -y python3-pip python3-tk python3-venv gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+pip3 install --break-system-packages -r src/requirements.txt pyinstaller
+```
+
+**When building:** Always ask the user if they also want a Linux build alongside the Windows `.exe`.

@@ -58,6 +58,10 @@ notifications:
     #   "sms"            - SMS notification sound
     #   "none"           - no sound
     #   "C:/path/to.wav" - path to a custom .wav file (plays independently)
+    #
+    # Linux: named sounds above are Windows-only presets; "default" plays a
+    # system sound via paplay/aplay. Custom paths should point to .oga/.wav
+    # files (e.g. "/usr/share/sounds/freedesktop/stereo/complete.oga").
     sound: whistle
 
   # Notify when a workflow run fails (conclusion: failure, timed_out, etc.)
