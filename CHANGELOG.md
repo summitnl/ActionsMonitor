@@ -2,6 +2,8 @@
 
 ### 2026-04-15
 
+- **GitHub Actions CI** — added daily build workflow (05:00 UTC) and manual release workflow. Builds Windows `.exe` and Linux binary via PyInstaller, creates date-tagged GitHub Releases (e.g. `v2026.04.15`) with changelog in the release body. Binaries removed from git tracking.
+- **Release-based auto-updater** — frozen builds now check the GitHub Releases API for updates on startup. Downloads the correct platform binary, swaps the executable in-place, and restarts. Source installs keep the existing git-based update flow.
 - **Linux support** — fixed `ctypes.wintypes` unconditional import that prevented the app from starting on Linux. Guarded `iconbitmap` and VBScript focus signal to Windows only. Added Linux binary (`ActionsMonitor-linux`) built via WSL/PyInstaller. Added `src/build.sh` for building on Linux or via WSL. Added Linux sound notes to config template. Updated README with Linux instructions.
 - **Sort controls per section** — each section header now has clickable Status, Updated, and Created sort labels. Click cycles through ascending (▲), descending (▼), and off. Only one sort active globally — activating one clears all others. Sort preference persists in `state.json`.
 - **Notification click brings window to foreground** — clicking a toast notification body now raises the app window and blinks the relevant row(s) with a brief amber flash animation (3 cycles, 900ms). The "Open workflow" action button keeps its existing behavior. Uses a VBScript signal file mechanism for silent IPC between the notification click and the running app.

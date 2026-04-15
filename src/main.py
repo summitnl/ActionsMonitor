@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
+import stat
 
 import tkinter as tk
 from tkinter import ttk
@@ -91,6 +92,11 @@ if IS_WINDOWS:
 # ---------------------------------------------------------------------------
 APP_NAME    = "Actions Monitor"
 APP_VERSION = "1.0"
+
+try:
+    from version import BUILD_COMMIT
+except ImportError:
+    BUILD_COMMIT = "dev"
 
 # When frozen by PyInstaller, __file__ points to a temp dir.
 # Use the executable's directory instead so config/state live next to the .exe.
@@ -2067,15 +2073,24 @@ class StartupManager:
 # ---------------------------------------------------------------------------
 class UpdateChecker:
     REPO_URL = "https://github.com/summitnl/ActionsMonitor"
+    RELEASES_API = "https://api.github.com/repos/summitnl/ActionsMonitor/releases/latest"
+
+    # Populated by _check_release() for use in apply_update() and the dialog.
+    _release_data: Optional[dict] = None
 
     @staticmethod
     def check() -> Optional[str]:
-        """Returns the new commit short-hash if an update is available, None otherwise.
+        """Returns a version string if an update is available, None otherwise.
 
-        Skipped when running as a frozen .exe (no git repo available).
+        Frozen builds check GitHub Releases; source builds use git.
         """
         if getattr(sys, "frozen", False):
-            return None
+            return UpdateChecker._check_release()
+        return UpdateChecker._check_git()
+
+    @staticmethod
+    def _check_git() -> Optional[str]:
+        """Git-based check for source installs."""
         try:
             subprocess.run(
                 ["git", "fetch", "origin", "main", "--quiet"],
@@ -2096,8 +2111,37 @@ class UpdateChecker:
         return None
 
     @staticmethod
+    def _check_release() -> Optional[str]:
+        """GitHub Releases check for frozen builds."""
+        if BUILD_COMMIT == "dev":
+            return None
+        try:
+            resp = requests.get(
+                UpdateChecker.RELEASES_API,
+                headers={"Accept": "application/vnd.github+json"},
+                timeout=15,
+            )
+            if resp.status_code != 200:
+                return None
+            data = resp.json()
+            release_sha = data.get("target_commitish", "")[:7]
+            if release_sha and release_sha != BUILD_COMMIT:
+                UpdateChecker._release_data = data
+                return data.get("tag_name", release_sha)
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def apply_update() -> tuple[bool, str]:
-        """Pull latest and install deps. Returns (success, message)."""
+        """Download/pull latest. Returns (success, message)."""
+        if getattr(sys, "frozen", False):
+            return UpdateChecker._apply_release_update()
+        return UpdateChecker._apply_git_update()
+
+    @staticmethod
+    def _apply_git_update() -> tuple[bool, str]:
+        """Pull latest and install deps (source installs)."""
         try:
             result = subprocess.run(
                 ["git", "pull", "origin", "main"],
@@ -2115,9 +2159,59 @@ class UpdateChecker:
             return False, str(exc)
 
     @staticmethod
+    def _apply_release_update() -> tuple[bool, str]:
+        """Download the latest release binary and replace the running executable."""
+        try:
+            data = UpdateChecker._release_data
+            if not data:
+                resp = requests.get(
+                    UpdateChecker.RELEASES_API,
+                    headers={"Accept": "application/vnd.github+json"},
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    return False, f"Failed to fetch release (HTTP {resp.status_code})"
+                data = resp.json()
+
+            asset_name = "ActionsMonitor.exe" if IS_WINDOWS else "ActionsMonitor-linux"
+            asset = next((a for a in data.get("assets", []) if a["name"] == asset_name), None)
+            if not asset:
+                return False, f"Asset '{asset_name}' not found in release"
+
+            download_url = asset["browser_download_url"]
+            current_exe = Path(sys.executable)
+            tmp_path = current_exe.with_suffix(".update")
+
+            with requests.get(download_url, stream=True, timeout=120) as dl:
+                dl.raise_for_status()
+                with open(tmp_path, "wb") as f:
+                    for chunk in dl.iter_content(chunk_size=65536):
+                        f.write(chunk)
+
+            if IS_WINDOWS:
+                old_path = current_exe.with_suffix(".old")
+                try:
+                    old_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                current_exe.rename(old_path)
+                tmp_path.rename(current_exe)
+            else:
+                tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IEXEC)
+                tmp_path.rename(current_exe)
+
+            return True, "Update complete"
+        except Exception as exc:
+            return False, str(exc)
+
+    @staticmethod
     def restart_app():
         """Re-launch the app and exit the current process."""
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        if getattr(sys, "frozen", False) and IS_WINDOWS:
+            subprocess.Popen([sys.executable] + sys.argv[1:])
+            sys.exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def _show_update_dialog(root: tk.Tk, commit_hash: str):
@@ -2137,17 +2231,21 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
     ).pack(**pad, pady=(16, 6))
 
     tk.Label(
-        dlg, text=f"Latest commit: {commit_hash}",
+        dlg, text=f"New version: {commit_hash}",
         font=("Segoe UI", 9), bg=BG_DARK, fg=FG_MUTED,
     ).pack(**pad, pady=(0, 4))
 
+    if getattr(sys, "frozen", False):
+        link_text, link_url = "View release on GitHub", f"{UpdateChecker.REPO_URL}/releases/tag/{commit_hash}"
+    else:
+        link_text, link_url = "View README on GitHub", f"{UpdateChecker.REPO_URL}#readme"
     link = tk.Label(
-        dlg, text="View README on GitHub",
+        dlg, text=link_text,
         font=("Segoe UI", 9, "underline"), bg=BG_DARK, fg=FG_LINK,
         cursor="hand2",
     )
     link.pack(**pad, pady=(0, 10))
-    link.bind("<Button-1>", lambda _: webbrowser.open(f"{UpdateChecker.REPO_URL}#readme"))
+    link.bind("<Button-1>", lambda _: webbrowser.open(link_url))
 
     status_lbl = tk.Label(dlg, text="", font=("Segoe UI", 9), bg=BG_DARK, fg=FG_MUTED)
     status_lbl.pack(**pad, pady=(0, 4))
@@ -3058,6 +3156,14 @@ class MainWindow:
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
+    # Clean up leftover files from a previous binary update
+    if getattr(sys, "frozen", False):
+        for suffix in (".old", ".update"):
+            try:
+                Path(sys.executable).with_suffix(suffix).unlink(missing_ok=True)
+            except OSError:
+                pass
+
     if IS_WINDOWS:
         _ensure_focus_vbs()
     config_mgr  = ConfigManager()

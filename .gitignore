@@ -19,3 +19,7 @@ _focus_signal
 build/
 dist/
 *.spec
+
+# Built binaries (produced by CI, distributed via GitHub Releases)
+ActionsMonitor.exe
+ActionsMonitor-linux
