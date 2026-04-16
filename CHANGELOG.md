@@ -1,5 +1,10 @@
 # Changelog
 
+### 2026-04-16
+
+- **Snooze rows** — failed workflow rows show a Zzz button below the status icon (with hover highlight). Click to snooze; right-click context menu also available on any row. Snoozed rows are visually dimmed (grey accent bar, muted text) and show a "SNOOZED" badge. Snoozed rows are excluded from the tray icon status aggregation so they won't turn the icon red. Notifications are suppressed for snoozed rows. Snooze auto-clears when a new run starts on that workflow. In-memory only — not persisted across restarts.
+- **Fix duplicate daily releases** — the daily build's change-detection compared a branch name against a commit SHA, causing it to always detect "changes" and create a release even when nothing had changed. Now resolves `targetCommitish` to a full SHA before comparing.
+
 ### 2026-04-15
 
 - **GitHub Actions CI** — added daily build workflow (05:00 UTC) and manual release workflow. Builds Windows `.exe` and Linux binary via PyInstaller, creates date-tagged GitHub Releases (e.g. `v2026.04.15`) with changelog in the release body. Binaries removed from git tracking.

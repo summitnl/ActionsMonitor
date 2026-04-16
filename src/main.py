@@ -223,6 +223,10 @@ _STATUS_PRIORITY = {
     ST_UNKNOWN: 0, ST_CANCELLED: 0, ST_SKIPPED: 0,
 }
 
+# Snoozed row keys — shared between MainWindow and pollers (thread-safe)
+_snoozed_keys: set[tuple[int, Optional[str]]] = set()
+_snoozed_lock = threading.Lock()
+
 # Colour palette — warm dark theme
 COLOUR = {
     ST_UNKNOWN:   "#A8A29E",  # warm grey (stone-400)
@@ -949,6 +953,10 @@ class WorkflowPoller(threading.Thread):
 
     def _fire_notification(self, notif_type: str, state: WorkflowState, global_notif: dict,
                            is_pr: bool = False, sub_key: Optional[str] = None):
+        # Suppress notifications for snoozed rows
+        with _snoozed_lock:
+            if (self.wid, sub_key) in _snoozed_keys:
+                return
         # Suppress stale notifications (e.g. after waking from sleep)
         max_age = parse_duration(global_notif.get("max_notification_age", "1h"))
         if max_age > 0:
@@ -1711,6 +1719,66 @@ def _make_refresh_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
+# --- Snooze button icon (crescent moon) ---
+
+_SNOOZE_ICON_SIZE = 24
+
+def _make_snooze_icon(size: int = _SNOOZE_ICON_SIZE, bg_colour: str = "#3D3530",
+                      fg_colour: str = "#A8A29E") -> Image.Image:
+    """Zzz icon on a filled circle background for the snooze button."""
+    ss = 4
+    hi = size * ss
+    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    # Background circle
+    pad = int(hi * 0.02)
+    draw.ellipse([pad, pad, hi - pad, hi - pad], fill=bg_colour)
+    # Draw three Z letters inside the circle
+    sw = max(2, round(hi / 16 * 1.3))
+    c = fg_colour
+    # Inset for the Z glyphs (inside the circle)
+    inset = int(hi * 0.18)
+    iw = hi - 2 * inset  # usable area
+    # Large Z (bottom-left area)
+    zw, zh = int(iw * 0.50), int(iw * 0.32)
+    zx, zy = inset, inset + int(iw * 0.55)
+    draw.line([(zx, zy), (zx + zw, zy)], fill=c, width=sw)
+    draw.line([(zx + zw, zy), (zx, zy + zh)], fill=c, width=sw)
+    draw.line([(zx, zy + zh), (zx + zw, zy + zh)], fill=c, width=sw)
+    # Medium Z (middle area)
+    zw2, zh2 = int(zw * 0.60), int(zh * 0.60)
+    zx2, zy2 = inset + int(iw * 0.28), inset + int(iw * 0.22)
+    draw.line([(zx2, zy2), (zx2 + zw2, zy2)], fill=c, width=sw)
+    draw.line([(zx2 + zw2, zy2), (zx2, zy2 + zh2)], fill=c, width=sw)
+    draw.line([(zx2, zy2 + zh2), (zx2 + zw2, zy2 + zh2)], fill=c, width=sw)
+    # Small Z (top-right area)
+    zw3, zh3 = int(zw * 0.35), int(zh * 0.35)
+    zx3, zy3 = inset + int(iw * 0.52), inset + int(iw * 0.02)
+    draw.line([(zx3, zy3), (zx3 + zw3, zy3)], fill=c, width=sw)
+    draw.line([(zx3 + zw3, zy3), (zx3, zy3 + zh3)], fill=c, width=sw)
+    draw.line([(zx3, zy3 + zh3), (zx3 + zw3, zy3 + zh3)], fill=c, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+_snooze_tk_icons: dict[str, ImageTk.PhotoImage] = {}
+
+
+def _init_snooze_icons():
+    """Generate snooze/unsnooze button icons (normal + hover). Call after Tk root exists."""
+    if _snooze_tk_icons:
+        return
+    # Snooze (muted) — normal and hover
+    _snooze_tk_icons["normal"] = ImageTk.PhotoImage(
+        _make_snooze_icon(bg_colour="#3D3530", fg_colour="#A8A29E"))
+    _snooze_tk_icons["hover"] = ImageTk.PhotoImage(
+        _make_snooze_icon(bg_colour="#4A3728", fg_colour="#FBBF24"))
+    # Unsnooze (active/amber) — normal and hover
+    _snooze_tk_icons["active"] = ImageTk.PhotoImage(
+        _make_snooze_icon(bg_colour="#92400E", fg_colour="#FEF3C7"))
+    _snooze_tk_icons["active_hover"] = ImageTk.PhotoImage(
+        _make_snooze_icon(bg_colour="#78350F", fg_colour="#FFFFFF"))
+
+
 # --- App / tray icon (play triangle on dark rounded rect + status dot) ---
 
 def _make_base_icon(size: int = 64) -> Image.Image:
@@ -1854,10 +1922,14 @@ def _init_status_icons():
 class WorkflowRow:
 
     def __init__(self, parent: tk.Frame, wid: int, state: WorkflowState, alt: bool,
-                 jira_base_url: str = ""):
+                 jira_base_url: str = "", sub_key: Optional[str] = None,
+                 snooze_cb: Optional[callable] = None):
         self.wid    = wid
+        self._sub_key = sub_key
         self._state = state
         self._jira_base_url = jira_base_url
+        self._snooze_cb = snooze_cb
+        self._snoozed = False
         bg = BG_ROW_ALT if alt else BG_ROW
 
         self.frame = tk.Frame(parent, bg=bg)
@@ -1867,13 +1939,28 @@ class WorkflowRow:
         self._accent = tk.Frame(self.frame, bg=COLOUR[state.status], width=3)
         self._accent.pack(side=tk.LEFT, fill=tk.Y)
 
+        # Left column: status icon + snooze button stacked vertically
+        self._left_col = tk.Frame(self.frame, bg=bg)
+        self._left_col.pack(side=tk.LEFT, padx=(12, 10), pady=(8, 4))
+
         # Status icon (Lucide-style image)
         icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
-        self._icon_lbl = tk.Label(self.frame, image=icon, bg=bg)
+        self._icon_lbl = tk.Label(self._left_col, image=icon, bg=bg)
         self._icon_lbl.image = icon  # prevent GC
-        self._icon_lbl.pack(side=tk.LEFT, padx=(12, 10), pady=8)
+        self._icon_lbl.pack()
 
-        # Right column — polling rate (pack before centre so it reserves space)
+        # Snooze button (Zzz icon) — shown only for failed rows
+        self._snooze_btn = tk.Label(
+            self._left_col, image=_snooze_tk_icons.get("normal"), bg=bg, cursor="hand2",
+        )
+        self._snooze_btn.image = _snooze_tk_icons.get("normal")
+        self._snooze_btn.bind("<Button-1>", lambda _: self._toggle_snooze())
+        self._snooze_btn.bind("<Enter>", self._snooze_hover_enter)
+        self._snooze_btn.bind("<Leave>", self._snooze_hover_leave)
+        _attach_tooltip(self._snooze_btn, "Snooze — dim this row and exclude from tray status")
+        # (packed/hidden dynamically in _update_labels based on status)
+
+        # Right side — polling rate (pack before centre so it reserves space)
         self._poll_lbl = tk.Label(
             self.frame, text="", font=("Segoe UI", 8),
             bg=bg, fg=FG_MUTED, anchor="ne",
@@ -1955,7 +2042,71 @@ class WorkflowRow:
         )
         self._info_lbl.pack(fill=tk.X)
 
+        # Snooze badge (shown in badge row when snoozed)
+        self._snooze_lbl = tk.Label(
+            self._badge_row, text="SNOOZED", font=("Segoe UI", 7, "bold"),
+            bg="#3D3530", fg="#A8A29E", anchor="w", padx=4, pady=0,
+        )
+
         self._bg = bg
+        self._update_labels()
+
+        # Right-click context menu
+        self._ctx_menu = tk.Menu(self.frame, tearoff=0, bg=BG_ROW, fg=FG_TEXT,
+                                 activebackground="#4A3728", activeforeground=FG_TEXT,
+                                 font=("Segoe UI", 9))
+        self._ctx_menu.add_command(label="Snooze", command=self._toggle_snooze)
+        self.frame.bind("<Button-3>", self._show_ctx_menu)
+        # Bind on all child widgets too so right-click works anywhere on the row
+        for widget in self.frame.winfo_children():
+            widget.bind("<Button-3>", self._show_ctx_menu)
+            if isinstance(widget, tk.Frame):
+                for child in widget.winfo_children():
+                    child.bind("<Button-3>", self._show_ctx_menu)
+
+    def _show_ctx_menu(self, event):
+        label = "Unsnooze" if self._snoozed else "Snooze"
+        self._ctx_menu.entryconfigure(0, label=label)
+        self._ctx_menu.tk_popup(event.x_root, event.y_root)
+
+    def _toggle_snooze(self):
+        if self._snooze_cb:
+            self._snooze_cb((self.wid, self._sub_key))
+
+    def _snooze_hover_enter(self, _event=None):
+        key = "active_hover" if self._snoozed else "hover"
+        icon = _snooze_tk_icons.get(key)
+        if icon:
+            self._snooze_btn.config(image=icon)
+            self._snooze_btn.image = icon
+
+    def _snooze_hover_leave(self, _event=None):
+        key = "active" if self._snoozed else "normal"
+        icon = _snooze_tk_icons.get(key)
+        if icon:
+            self._snooze_btn.config(image=icon)
+            self._snooze_btn.image = icon
+
+    def set_snoozed(self, snoozed: bool):
+        self._snoozed = snoozed
+        if snoozed:
+            # Dim accent bar and text
+            self._accent.config(bg="#57534E")  # stone-600
+            self._icon_lbl.config(state="disabled")
+            self._info_lbl.config(fg="#78716C")  # stone-500
+            self._name_lbl.config(fg="#78716C")
+            self._poll_lbl.config(fg="#78716C")
+            self._branch_lbl.config(fg="#78716C")
+            self._pr_title_lbl.config(fg="#78716C")
+        else:
+            # Restore normal colours
+            self._accent.config(bg=COLOUR.get(self._state.status, COLOUR[ST_UNKNOWN]))
+            self._icon_lbl.config(state="normal")
+            self._info_lbl.config(fg=FG_MUTED)
+            self._name_lbl.config(fg=FG_TEXT)
+            self._poll_lbl.config(fg=FG_MUTED)
+            self._branch_lbl.config(fg=FG_MUTED)
+            self._pr_title_lbl.config(fg=FG_TEXT)
         self._update_labels()
 
     def _open_url(self, _event=None):
@@ -1974,12 +2125,13 @@ class WorkflowRow:
     def update(self, state: WorkflowState, poll_rate: int, jira_base_url: str = ""):
         self._state = state
         self._jira_base_url = jira_base_url or self._jira_base_url
-        # Update accent bar colour
-        self._accent.config(bg=COLOUR.get(state.status, COLOUR[ST_UNKNOWN]))
-        # Update status icon
-        icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
-        self._icon_lbl.config(image=icon)
-        self._icon_lbl.image = icon
+        if not self._snoozed:
+            # Update accent bar colour
+            self._accent.config(bg=COLOUR.get(state.status, COLOUR[ST_UNKNOWN]))
+            # Update status icon
+            icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
+            self._icon_lbl.config(image=icon)
+            self._icon_lbl.image = icon
         self._poll_lbl.config(text=f"every {poll_rate}s")
         self._update_labels()
 
@@ -2073,6 +2225,12 @@ class WorkflowRow:
             else:
                 self._stale_lbl.pack_forget()
 
+            if self._snoozed:
+                self._snooze_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                has_badges = True
+            else:
+                self._snooze_lbl.pack_forget()
+
             if has_badges:
                 self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
             else:
@@ -2087,7 +2245,28 @@ class WorkflowRow:
             self._review_lbl.pack_forget()
             self._stale_lbl.pack_forget()
             self._pr_title_lbl.pack_forget()
-            self._badge_row.pack_forget()
+
+            # For non-PR rows, show SNOOZED badge if needed
+            if self._snoozed:
+                self._snooze_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
+            else:
+                self._snooze_lbl.pack_forget()
+                self._badge_row.pack_forget()
+
+        # Show snooze button below status icon for failed/snoozed rows
+        if self._snoozed:
+            icon = _snooze_tk_icons.get("active")
+            self._snooze_btn.config(image=icon)
+            self._snooze_btn.image = icon
+            self._snooze_btn.pack(pady=(4, 0))
+        elif s.status == ST_FAILURE:
+            icon = _snooze_tk_icons.get("normal")
+            self._snooze_btn.config(image=icon)
+            self._snooze_btn.image = icon
+            self._snooze_btn.pack(pady=(4, 0))
+        else:
+            self._snooze_btn.pack_forget()
 
 
 # ---------------------------------------------------------------------------
@@ -2487,6 +2666,7 @@ class MainWindow:
         self._pollers: dict[int, WorkflowPoller] = {}
         self._states:  dict[tuple[int, Optional[str]], WorkflowState]  = {}
         self._rows:    dict[tuple[int, Optional[str]], WorkflowRow]     = {}
+        self._snoozed: set[tuple[int, Optional[str]]] = set()
         self._tray: Optional[TrayManager] = None
         self._sections: list[tk.Frame] = []           # section header+container frames
         self._wid_container: dict[int, tk.Frame] = {} # wid → section content frame
@@ -2517,6 +2697,7 @@ class MainWindow:
         self._restore_collapse_state()
 
         _init_status_icons()
+        _init_snooze_icons()
         self._build_ui()
         self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
         self._root.bind("<Unmap>", self._on_unmap)
@@ -2982,7 +3163,8 @@ class MainWindow:
 
             alt = len(self._rows) % 2 == 1
             jira_url = cfg.get("jira_base_url", "")
-            row = WorkflowRow(container, wid, state, alt, jira_base_url=jira_url)
+            row = WorkflowRow(container, wid, state, alt, jira_base_url=jira_url,
+                              sub_key=None, snooze_cb=self._toggle_snooze)
             poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
             row.update(state, poll_rate, jira_base_url=jira_url)
             self._rows[key] = row
@@ -3029,9 +3211,20 @@ class MainWindow:
             if row:
                 row.frame.destroy()
             self._states.pop(key, None)
+            self._unsnooze(key)
             self._restripe_rows()
             self._resort_section_for_wid(event.workflow_id)
         else:
+            # Auto-clear snooze when a new run starts
+            prev = self._states.get(key)
+            if (key in self._snoozed and prev is not None
+                    and event.new_state.run_id is not None
+                    and event.new_state.run_id != prev.run_id):
+                self._unsnooze(key)
+                row = self._rows.get(key)
+                if row:
+                    row.set_snoozed(False)
+
             self._states[key] = event.new_state
             row = self._rows.get(key)
             if row:
@@ -3041,13 +3234,37 @@ class MainWindow:
                 container = self._wid_container.get(event.workflow_id, self._list_frame)
                 alt = len(self._rows) % 2 == 1
                 new_row = WorkflowRow(container, event.workflow_id, event.new_state, alt,
-                                      jira_base_url=jira_url)
+                                      jira_base_url=jira_url, sub_key=event.sub_key,
+                                      snooze_cb=self._toggle_snooze)
                 new_row.update(event.new_state, poll_rate, jira_base_url=jira_url)
                 self._rows[key] = new_row
             self._resort_section_for_wid(event.workflow_id)
 
         if self._tray:
-            self._tray.update(list(self._states.values()))
+            unsnoozed = [s for k, s in self._states.items() if k not in self._snoozed]
+            self._tray.update(unsnoozed)
+
+    def _toggle_snooze(self, key: tuple[int, Optional[str]]):
+        """Toggle snooze state for a row."""
+        if key in self._snoozed:
+            self._unsnooze(key)
+        else:
+            self._snoozed.add(key)
+            with _snoozed_lock:
+                _snoozed_keys.add(key)
+        row = self._rows.get(key)
+        if row:
+            row.set_snoozed(key in self._snoozed)
+        # Refresh tray icon with snoozed rows excluded
+        if self._tray:
+            unsnoozed = [s for k, s in self._states.items() if k not in self._snoozed]
+            self._tray.update(unsnoozed)
+
+    def _unsnooze(self, key: tuple[int, Optional[str]]):
+        """Remove snooze state for a key."""
+        self._snoozed.discard(key)
+        with _snoozed_lock:
+            _snoozed_keys.discard(key)
 
     def _restripe_rows(self):
         """Recalculate alternating row backgrounds after a row is removed."""
@@ -3076,6 +3293,9 @@ class MainWindow:
         self._stop_all_pollers()
         self._rows.clear()
         self._states.clear()
+        self._snoozed.clear()
+        with _snoozed_lock:
+            _snoozed_keys.clear()
         self._destroy_sections()
         # Reset cached username so a token change takes effect
         with _github_username_lock:
