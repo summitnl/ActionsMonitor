@@ -25,7 +25,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          LATEST=$(gh release view --json targetCommitish -q '.targetCommitish' 2>/dev/null || echo "")
+          # targetCommitish may return a branch name instead of a SHA —
+          # resolve it so the comparison always uses full SHAs.
+          LATEST_REF=$(gh release view --json targetCommitish -q '.targetCommitish' 2>/dev/null || echo "")
+          if [ -n "$LATEST_REF" ]; then
+            LATEST=$(git rev-parse "$LATEST_REF" 2>/dev/null || echo "")
+          else
+            LATEST=""
+          fi
           HEAD=$(git rev-parse HEAD)
           SHORT=$(git rev-parse --short=7 HEAD)
           if [ "$LATEST" = "$HEAD" ]; then
