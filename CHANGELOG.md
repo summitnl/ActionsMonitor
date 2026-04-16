@@ -2,6 +2,8 @@
 
 ### 2026-04-16
 
+- **Immediate merged PR removal** — PR-mode rows for merged/closed PRs are now removed on the next poll cycle instead of waiting for the 5-minute stale timeout. The stale timeout is preserved as a fallback for edge cases (API failures, `max_prs` truncation).
+- **Fix open PR filter bug** — when `_fetch_user_open_prs()` API call failed, the empty-set guard skipped run filtering entirely, causing merged PR rows to persist indefinitely. Now tracks API success separately so the filter works correctly even when the user has zero open PRs.
 - **Linux system dependency check** — on startup, checks for required system libraries (GTK3, AppIndicator, paplay/aplay). Shows a dismissible warning dialog listing missing packages with install instructions. App continues running regardless.
 - **Linux sound defaults** — new configs on Linux default to `"default"` sound (freedesktop system sound via paplay) instead of `"whistle"` (Windows-only winotify preset).
 - **Resilient tray icon** — tray icon initialization wrapped in try/except so the app runs without a tray icon if system libraries are missing (e.g. no AppIndicator on Linux). Window close/minimize now falls back to iconify instead of withdraw when no tray is present, preventing the app from becoming invisible.

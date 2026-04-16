@@ -1135,8 +1135,10 @@ class PRWorkflowPoller(WorkflowPoller):
         # Fetch the user's open PRs — used to discover branches with old runs
         # AND to filter out branches whose PRs have been closed/merged.
         branches_with_runs = {r.get("head_branch") for r in all_runs}
+        open_prs_ok = False
         try:
             open_prs = self._fetch_user_open_prs(username, token)
+            open_prs_ok = True
         except Exception:
             open_prs = []
         open_pr_branches = {pr["branch"] for pr in open_prs}
@@ -1154,7 +1156,7 @@ class PRWorkflowPoller(WorkflowPoller):
             branches_with_runs.add(branch)
 
         # Drop runs for branches that no longer have an open PR
-        if open_pr_branches:
+        if open_prs_ok:
             all_runs = [r for r in all_runs if r.get("head_branch") in open_pr_branches]
 
         # Group all runs by head_branch, keeping latest per workflow file
@@ -1328,14 +1330,15 @@ class PRWorkflowPoller(WorkflowPoller):
         for sk in list(self._last_seen.keys()):
             if sk in active_sub_keys:
                 continue
+            # If open-PR list is reliable and branch is gone, remove immediately
+            branch_part = sk.split("#")[0] if "#" in sk else sk
+            if open_prs_ok and branch_part not in open_pr_branches:
+                self._remove_sub_key(sk)
+                continue
+            # Fallback: stale timeout for rows that vanish for other reasons
             elapsed = (now - self._last_seen[sk]).total_seconds()
             if elapsed >= self._stale_after:
-                branch_part = sk.split("#")[0] if "#" in sk else sk
-                dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=branch_part)
-                self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=sk, removed=True))
-                del self._last_seen[sk]
-                self._prev_run_ids.pop(sk, None)
-                self._prev_statuses.pop(sk, None)
+                self._remove_sub_key(sk)
 
     def _fetch_user_open_prs(self, username: str, token: str) -> list[dict]:
         """Fetch open PRs authored by the user. Returns list of {number, branch, base_ref}."""
@@ -1387,6 +1390,15 @@ class PRWorkflowPoller(WorkflowPoller):
             return results
         except Exception:
             return []
+
+    def _remove_sub_key(self, sk: str):
+        """Send a removal event and clean up tracking state for a sub_key."""
+        branch_part = sk.split("#")[0] if "#" in sk else sk
+        dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=branch_part)
+        self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=sk, removed=True))
+        self._last_seen.pop(sk, None)
+        self._prev_run_ids.pop(sk, None)
+        self._prev_statuses.pop(sk, None)
 
     def _fetch_pr_review_status(self, pr_number: int, token: str) -> Optional[str]:
         """Fetch the aggregate review status for a PR.
