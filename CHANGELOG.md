@@ -2,6 +2,8 @@
 
 ### 2026-04-16
 
+- **Auto-hide scrollbar** — the workflow list scrollbar now only appears when there are enough items to scroll. Correctly shows/hides when the list grows or shrinks, including after config hot-reloads.
+
 - **Fix run timestamps showing UTC instead of local time** — the time displayed next to run numbers (e.g. "16 Apr 14:30") was parsed without timezone conversion, causing it to be offset from the user's local time. Now properly converts from UTC to the system's local timezone.
 
 - **Immediate merged PR removal** — PR-mode rows for merged/closed PRs are now removed on the next poll cycle instead of waiting for the 5-minute stale timeout. The stale timeout is preserved as a fallback for edge cases (API failures, `max_prs` truncation).

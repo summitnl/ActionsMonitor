@@ -2821,19 +2821,28 @@ class MainWindow:
                                   style="Dark.Vertical.TScrollbar")
         canvas.configure(yscrollcommand=scrollbar.set)
 
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self._list_frame = tk.Frame(canvas, bg=BG_DARK)
         self._canvas_window = canvas.create_window((0, 0), window=self._list_frame, anchor="nw")
 
         def _update_scroll_region():
+            self._list_frame.update_idletasks()
             req_h = self._list_frame.winfo_reqheight()
             vis_h = canvas.winfo_height()
             canvas.itemconfig(self._canvas_window, width=canvas.winfo_width(),
                               height=max(req_h, vis_h))
             canvas.configure(scrollregion=(0, 0, self._list_frame.winfo_reqwidth(),
                                            max(req_h, vis_h)))
+            if req_h > vis_h:
+                if not scrollbar.winfo_ismapped():
+                    canvas.pack_forget()
+                    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+                    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            else:
+                if scrollbar.winfo_ismapped():
+                    scrollbar.pack_forget()
+        self._update_scroll_region = _update_scroll_region
 
         def _on_canvas_configure(e):
             canvas.after_idle(_update_scroll_region)
@@ -3285,12 +3294,16 @@ class MainWindow:
     # Queue drain (called periodically on main thread)
     # ------------------------------------------------------------------
     def _drain_queue(self):
+        had_events = False
         try:
             while True:
                 event: StatusEvent = self._event_queue.get_nowait()
                 self._apply_event(event)
+                had_events = True
         except queue.Empty:
             pass
+        if had_events:
+            self._canvas.after_idle(self._update_scroll_region)
         if IS_WINDOWS:
             self._check_focus_signal()
         self._root.after(500, self._drain_queue)
@@ -3400,6 +3413,7 @@ class MainWindow:
         with _github_username_lock:
             _cached_github_username = None
         self._start_pollers()
+        self._canvas.after_idle(self._update_scroll_region)
 
     # ------------------------------------------------------------------
     # Window / tray behaviour
