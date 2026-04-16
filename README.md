@@ -8,24 +8,20 @@ A lightweight tray application that monitors GitHub Actions workflow statuses an
 
 > See the [Changelog](CHANGELOG.md) for updates.
 
-![Application window](docs/application.png)
+## License
 
-## Features
-
-- **Live status** — polls your configured workflows and shows green / orange / red status indicators
-- **PR mode** — monitor your own pull request builds: one row per active PR, with branch prefix tags, PR numbers, target branch indicators, and a DRAFT indicator. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Stale rows auto-remove after a configurable timeout
-- **System tray** — minimises to tray; tray icon colour reflects the worst combined state across all workflows
-
-  ![System tray icon](docs/systemtray.png)
-- **Toast notifications** — notified when a run starts, succeeds, or fails, with the app icon and an **Open workflow** button that takes you straight to the run
-- **Per-workflow config** — different polling rates, branch filters, and notification overrides per workflow
-- **Hot-reload** — edit `config.yaml` and the app picks up changes within seconds, no restart needed
-- **Start with Windows** — toggle in the app footer; writes a registry entry for the current user (no admin required)
+This project is licensed under the [Summit Free Use License](LICENSE). All copies and forks must retain the [NOTICE](NOTICE) file.
 
 ## Requirements
 
 - **Windows** 10 / 11
 - **Linux** with GTK3 (Ubuntu 22.04+, Fedora, etc.) — tray icon requires `gir1.2-ayatanaappindicator3-0.1`
+
+## Releases / Download
+
+Download the latest build from [GitHub Releases](https://github.com/summitnl/ActionsMonitor/releases/latest).
+
+![Application window](docs/application.png)
 
 ## Getting started
 
@@ -43,32 +39,17 @@ A lightweight tray application that monitors GitHub Actions workflow statuses an
 
 > **Note:** On Linux, named notification sounds (`whistle`, `reminder`, etc.) are Windows-only. Use `"default"` for a system sound via paplay/aplay, or provide a path to an `.oga`/`.wav` file.
 
-### Development setup
+## Features
 
-If you want to run from source instead of the binary:
+- **Live status** — polls your configured workflows and shows green / orange / red status indicators
+- **PR mode** — monitor your own pull request builds: one row per active PR, with branch prefix tags, PR numbers, target branch indicators, and a DRAFT indicator. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Stale rows auto-remove after a configurable timeout
+- **System tray** — minimises to tray; tray icon colour reflects the worst combined state across all workflows
 
-```bash
-# Windows
-src\dev-install.bat
-
-# Linux
-pip3 install -r src/requirements.txt
-sudo apt-get install -y python3-tk gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
-python3 src/main.py
-```
-
-### Building from source
-
-Requires Python 3.10+ with dependencies installed (`pip install -r src/requirements.txt`).
-
-```bash
-# Windows — produces ActionsMonitor.exe
-src\build.bat
-
-# Linux — produces ActionsMonitor-linux
-pyinstaller --onefile --name ActionsMonitor-linux --add-data "config.template.yaml:." src/main.py
-cp dist/ActionsMonitor-linux .
-```
+  ![System tray icon](docs/systemtray.png)
+- **Toast notifications** — notified when a run starts, succeeds, or fails, with the app icon and an **Open workflow** button that takes you straight to the run
+- **Per-workflow config** — different polling rates, branch filters, and notification overrides per workflow
+- **Hot-reload** — edit `config.yaml` and the app picks up changes within seconds, no restart needed
+- **Start with Windows** — toggle in the app footer; writes a registry entry for the current user (no admin required)
 
 ## Configuration
 
@@ -177,12 +158,6 @@ notifications:
 
 The tray icon follows the same logic, showing the worst state across all configured workflows.
 
-## Uninstall
-
-Disable **Start with Windows** in the app footer, then delete the folder.
-
-If you used the development setup, run `src\dev-uninstall.bat` to also remove the startup registry entry and Python packages.
-
 ## Updating
 
 The app checks for updates automatically on startup:
@@ -190,7 +165,36 @@ The app checks for updates automatically on startup:
 - **Binary builds** check GitHub Releases for a newer version. If found, a dialog offers to download and install the update in-place.
 - **Running from source** uses `git fetch` to detect new commits. If behind, a dialog offers to pull and restart.
 
-## License
+### Development setup
 
-This project is licensed under the [Summit Free Use License](LICENSE). All copies and forks must retain the [NOTICE](NOTICE) file.
+If you want to run from source instead of the binary:
+
+```bash
+# Windows
+src\dev-install.bat
+
+# Linux
+pip3 install -r src/requirements.txt
+sudo apt-get install -y python3-tk gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
+python3 src/main.py
+```
+
+### Building from source
+
+Requires Python 3.10+ with dependencies installed (`pip install -r src/requirements.txt`).
+
+```bash
+# Windows — produces ActionsMonitor.exe
+src\build.bat
+
+# Linux — produces ActionsMonitor-linux
+pyinstaller --onefile --name ActionsMonitor-linux --add-data "config.template.yaml:." src/main.py
+cp dist/ActionsMonitor-linux .
+```
+
+## Uninstall
+
+Disable **Start with Windows** in the app footer, then delete the folder.
+
+If you used the development setup, run `src\dev-uninstall.bat` to also remove the startup registry entry and Python packages.
 
