@@ -4,6 +4,9 @@ config.yaml
 # Window state (position/size) — per-machine, not portable
 state.json
 
+# Claude Code
+.claude/
+
 # Python
 __pycache__/
 *.py[cod]
