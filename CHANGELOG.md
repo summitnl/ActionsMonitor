@@ -2,6 +2,31 @@
 
 ### 2026-04-16
 
+- **Linux system dependency check** — on startup, checks for required system libraries (GTK3, AppIndicator, paplay/aplay). Shows a dismissible warning dialog listing missing packages with install instructions. App continues running regardless.
+- **Linux sound defaults** — new configs on Linux default to `"default"` sound (freedesktop system sound via paplay) instead of `"whistle"` (Windows-only winotify preset).
+- **Resilient tray icon** — tray icon initialization wrapped in try/except so the app runs without a tray icon if system libraries are missing (e.g. no AppIndicator on Linux). Window close/minimize now falls back to iconify instead of withdraw when no tray is present, preventing the app from becoming invisible.
+- **Code review fixes** — comprehensive cleanup pass addressing bugs, inefficiencies, and Linux gaps:
+  - Fix mousewheel scrolling on Linux (was Windows-only `<MouseWheel>` event; added `Button-4`/`Button-5` bindings)
+  - Fix window vanishing on minimize when tray icon is unavailable (close button now minimizes instead of hiding)
+  - Fix update checker `target_commitish` comparison (could be a branch name, not a SHA)
+  - Fix `StartupManager._exe_cmd()` for frozen builds (was using `__file__` which points to a temp dir)
+  - Guard Windows-only code paths (`_check_focus_signal`, VBS cleanup) to skip on Linux
+  - Remove redundant `_fetch_pr_draft()` API call per PR per poll (data already cached from open PRs fetch)
+  - Cache `_make_base_icon()` result (was regenerated 7× for tray icons)
+  - Remove duplicate `_REPR_PRIORITY` dict (was copy of module-level `_STATUS_PRIORITY`)
+  - Extract shared `_set_row_bg` helper (deduplicate bg-walking in 3 places)
+  - Consolidate `state.json` reads on startup (was read 3× independently)
+  - Fix config watch interval to 5s (was 2s, docs said 5s)
+  - Fix `_restripe_rows()` to stripe per-section instead of globally
+  - Move `_review_cfg` dict to module-level constant (was rebuilt every UI update)
+  - Add platform-aware `UI_FONT` constant (`"DejaVu Sans"` on Linux instead of `"Segoe UI"`)
+  - Try multiple font files for question mark icon on Linux (`DejaVu Sans Bold`, `Liberation Sans Bold`, `FreeSans Bold`)
+  - Remove duplicate `import ctypes` and unused variable in monitor enumeration
+  - Remove dead methods (`_restore_window_state`, `_restore_collapse_state`, `_restore_always_on_top`, `_fetch_pr_draft`)
+  - Remove unused `_SORT_KEYS` class variable
+  - Move `base64`/`io` imports from inside `_build_ui` to module level
+  - Extract `_stale_cfg` dict to module-level `_STALENESS_BADGE_CFG` constant
+- **Always on top** — checkbox next to "Start with Windows" in the footer. Keeps the window above all other windows. State persisted in `state.json` and restored on startup.
 - **Snooze rows** — failed workflow rows show a Zzz button below the status icon (with hover highlight). Click to snooze; right-click context menu also available on any row. Snoozed rows are visually dimmed (grey accent bar, muted text) and show a "SNOOZED" badge. Snoozed rows are excluded from the tray icon status aggregation so they won't turn the icon red. Notifications are suppressed for snoozed rows. Snooze auto-clears when a new run starts on that workflow. In-memory only — not persisted across restarts.
 - **Fix duplicate daily releases** — the daily build's change-detection compared a branch name against a commit SHA, causing it to always detect "changes" and create a release even when nothing had changed. Now resolves `targetCommitish` to a full SHA before comparing.
 

@@ -28,6 +28,8 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
 import stat
+import base64
+import io
 
 import tkinter as tk
 from tkinter import ttk
@@ -83,9 +85,23 @@ IS_LINUX   = platform.system() == "Linux"
 if IS_WINDOWS:
     import winsound
     import winreg
-    import ctypes
     # Tell Windows to identify this process as "Actions Monitor" rather than "Python"
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Summit.ActionsMonitor")
+
+# Linux system dependency check — warn about missing libs needed for tray/notifications
+_LINUX_MISSING: list[str] = []
+if IS_LINUX:
+    import importlib
+    for _gi_mod, _pkg in [("gi", "gir1.2-gtk-3.0"),
+                          ("gi.repository.Gtk", "gir1.2-gtk-3.0"),
+                          ("gi.repository.AyatanaAppIndicator3", "gir1.2-ayatanaappindicator3-0.1")]:
+        try:
+            importlib.import_module(_gi_mod)
+        except (ImportError, ValueError):
+            if _pkg not in _LINUX_MISSING:
+                _LINUX_MISSING.append(_pkg)
+    if not shutil.which("paplay") and not shutil.which("aplay"):
+        _LINUX_MISSING.append("pulseaudio-utils (paplay) or alsa-utils (aplay)")
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -223,6 +239,21 @@ _STATUS_PRIORITY = {
     ST_UNKNOWN: 0, ST_CANCELLED: 0, ST_SKIPPED: 0,
 }
 
+# Review status badge config: state → (label, bg_colour, fg_colour)
+_REVIEW_BADGE_CFG = {
+    "approved":          ("APPROVED",          "#1C3A2A", "#4ADE80"),
+    "changes_requested": ("CHANGES REQUESTED", "#3A1C1C", "#F87171"),
+    "commented":         ("IN REVIEW",         "#1C2A3A", "#60A5FA"),
+    "pending":           ("REVIEW PENDING",    "#3D3530", "#FBBF24"),
+}
+
+# Staleness badge config: level → (bg_colour, fg_colour)
+_STALENESS_BADGE_CFG = {
+    "slightly_stale":   ("#3D3520", "#EAB308"),
+    "moderately_stale": ("#3A2A1C", "#F97316"),
+    "very_stale":       ("#3A1C1C", "#EF4444"),
+}
+
 # Snoozed row keys — shared between MainWindow and pollers (thread-safe)
 _snoozed_keys: set[tuple[int, Optional[str]]] = set()
 _snoozed_lock = threading.Lock()
@@ -291,6 +322,7 @@ FG_TEXT    = "#E7E5E4"   # stone-200
 FG_MUTED   = "#A8A29E"   # stone-400
 FG_LINK    = "#FBBF24"   # amber-400 (primary accent)
 ACCENT     = "#292524"   # stone-800
+UI_FONT    = "Segoe UI" if IS_WINDOWS else "DejaVu Sans"
 
 # Named sounds → winotify audio presets (Windows toast-coupled sounds)
 # These play in sync with the notification flyout instead of independently.
@@ -312,7 +344,7 @@ DEFAULT_CONFIG: dict = {
     "notifications": {
         "batch_window": 3,
         "max_notification_age": "1h",
-        "new_run":  {"enabled": True,  "sound": "whistle"},
+        "new_run":  {"enabled": True,  "sound": "default" if IS_LINUX else "whistle"},
         "failure":  {"enabled": True,  "sound": "default"},
         "success":  {"enabled": True,  "sound": "none"},
     },
@@ -361,6 +393,14 @@ class ConfigManager:
         template = _APP_DIR / "config.template.yaml"
         if template.exists():
             shutil.copy2(template, CONFIG_FILE)
+            # On Linux, replace Windows-only named sounds with cross-platform defaults
+            if IS_LINUX:
+                try:
+                    text = CONFIG_FILE.read_text(encoding="utf-8")
+                    text = text.replace("sound: whistle", "sound: default")
+                    CONFIG_FILE.write_text(text, encoding="utf-8")
+                except Exception:
+                    pass
         else:
             with open(CONFIG_FILE, "w", encoding="utf-8") as fh:
                 yaml.dump(DEFAULT_CONFIG, fh, default_flow_style=False)
@@ -1145,8 +1185,6 @@ class PRWorkflowPoller(WorkflowPoller):
         active_branches = {b: by_branch[b] for b in branch_order[:self._max_prs]}
         now = datetime.now()
 
-        _REPR_PRIORITY = {ST_FAILURE: 4, ST_RUNNING: 3, ST_QUEUED: 2, ST_SUCCESS: 1,
-                          ST_UNKNOWN: 0, ST_CANCELLED: 0, ST_SKIPPED: 0}
         active_sub_keys: set[str] = set()
 
         for branch_name, branch_runs in active_branches.items():
@@ -1197,7 +1235,7 @@ class PRWorkflowPoller(WorkflowPoller):
                     st = _resolve_status(api_status, conclusion)
                     run_statuses.append(st)
 
-                    p = _REPR_PRIORITY.get(st, 0)
+                    p = _STATUS_PRIORITY.get(st, 0)
                     if p > rep_priority:
                         rep_priority = p
                         representative_run = run
@@ -1238,12 +1276,12 @@ class PRWorkflowPoller(WorkflowPoller):
                 if pr_num is not None:
                     state.pr_number = pr_num
                     state.pr_target = pr_base_ref
-                    # Always re-fetch PR details to keep draft/title up to date
-                    state.is_draft = self._fetch_pr_draft(pr_num, token)
-                    if pr_num in self._pr_cache:
-                        state.pr_title = self._pr_cache[pr_num].get("title")
-                        if not state.pr_target:
-                            state.pr_target = self._pr_cache[pr_num].get("base_ref", "")
+                    # PR details already cached by _fetch_user_open_prs / _fetch_prs_for_branch
+                    cached = self._pr_cache.get(pr_num, {})
+                    state.is_draft = cached.get("draft", False)
+                    state.pr_title = cached.get("title")
+                    if not state.pr_target:
+                        state.pr_target = cached.get("base_ref", "")
                     state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
                     state.review_status = self._fetch_pr_review_status(pr_num, token)
 
@@ -1349,18 +1387,6 @@ class PRWorkflowPoller(WorkflowPoller):
             return results
         except Exception:
             return []
-
-    def _fetch_pr_draft(self, pr_number: int, token: str) -> bool:
-        """Fetch draft status for a PR. Caches the result."""
-        try:
-            url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
-            resp = requests.get(url, headers=_gh_headers(token), timeout=15)
-            resp.raise_for_status()
-            data = resp.json()
-            self._cache_pr(pr_number, data)
-            return data.get("draft", False)
-        except Exception:
-            return False
 
     def _fetch_pr_review_status(self, pr_number: int, token: str) -> Optional[str]:
         """Fetch the aggregate review status for a PR.
@@ -1660,10 +1686,15 @@ def _draw_lucide_circle_help(size: int, bg_fill: str) -> Image.Image:
     _fill_circle(draw, hi, bg_fill)
     sw = _sw(hi)
     # Question mark — use a font for clean rendering
-    try:
-        fsize = int(hi * 0.52)
-        font = ImageFont.truetype("segoeuib.ttf", fsize)  # Segoe UI Bold
-    except Exception:
+    fsize = int(hi * 0.52)
+    font = None
+    for fname in ("segoeuib.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "FreeSansBold.ttf"):
+        try:
+            font = ImageFont.truetype(fname, fsize)
+            break
+        except Exception:
+            continue
+    if font is None:
         font = ImageFont.load_default()
     bbox = draw.textbbox((0, 0), "?", font=font)
     tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
@@ -1810,9 +1841,14 @@ def _make_base_icon(size: int = 64) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
+_base_icon_cache: dict[int, Image.Image] = {}
+
+
 def _make_icon_image(colour: str, size: int = 64) -> Image.Image:
     """Base icon with a coloured status dot in the bottom-right corner."""
-    img = _make_base_icon(size)
+    if size not in _base_icon_cache:
+        _base_icon_cache[size] = _make_base_icon(size)
+    img = _base_icon_cache[size].copy()
     ss = 4
     hi = size * ss
     overlay = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
@@ -1962,7 +1998,7 @@ class WorkflowRow:
 
         # Right side — polling rate (pack before centre so it reserves space)
         self._poll_lbl = tk.Label(
-            self.frame, text="", font=("Segoe UI", 8),
+            self.frame, text="", font=(UI_FONT, 8),
             bg=bg, fg=FG_MUTED, anchor="ne",
         )
         self._poll_lbl.pack(side=tk.RIGHT, padx=(4, 12), anchor="n", pady=(10, 0))
@@ -1976,7 +2012,7 @@ class WorkflowRow:
         self._top_row.pack(fill=tk.X)
 
         self._name_lbl = tk.Label(
-            self._top_row, text=state.name, font=("Segoe UI", 9),
+            self._top_row, text=state.name, font=(UI_FONT, 9),
             bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
         )
         self._name_lbl.pack(side=tk.LEFT)
@@ -1984,13 +2020,13 @@ class WorkflowRow:
 
         # Separator " / " between workflow name and PR info (hidden for non-PR)
         self._sep_lbl = tk.Label(
-            self._top_row, text=" / ", font=("Segoe UI", 9),
+            self._top_row, text=" / ", font=(UI_FONT, 9),
             bg=bg, fg=FG_MUTED, anchor="w",
         )
 
         # PR number + branch short name (subtitle in PR mode, opens build run)
         self._branch_lbl = tk.Label(
-            self._top_row, text="", font=("Segoe UI", 8),
+            self._top_row, text="", font=(UI_FONT, 8),
             bg=bg, fg=FG_MUTED, cursor="hand2", anchor="w",
         )
         self._branch_lbl.bind("<Button-1>", self._open_url)
@@ -2000,17 +2036,17 @@ class WorkflowRow:
         # (only packed when badges are present)
 
         self._prefix_lbl = tk.Label(
-            self._badge_row, text="", font=("Segoe UI", 7),
+            self._badge_row, text="", font=(UI_FONT, 7),
             bg="#3D3530", fg="#FBBF24", anchor="w", padx=3, pady=0,
         )
 
         self._draft_lbl = tk.Label(
-            self._badge_row, text="DRAFT", font=("Segoe UI", 7, "bold"),
+            self._badge_row, text="DRAFT", font=(UI_FONT, 7, "bold"),
             bg="#92400E", fg="#FEF3C7", anchor="w", padx=4, pady=0,
         )
 
         self._jira_lbl = tk.Label(
-            self._badge_row, text="", font=("Segoe UI", 7),
+            self._badge_row, text="", font=(UI_FONT, 7),
             bg="#302830", fg="#A78BFA", anchor="w", padx=3, pady=0,
             cursor="hand2",
         )
@@ -2018,33 +2054,33 @@ class WorkflowRow:
 
         # Review status badge (APPROVED / CHANGES REQUESTED / REVIEW PENDING)
         self._review_lbl = tk.Label(
-            self._badge_row, text="", font=("Segoe UI", 7),
+            self._badge_row, text="", font=(UI_FONT, 7),
             anchor="w", padx=3, pady=0,
         )
 
         # Staleness badge (STALE 3d)
         self._stale_lbl = tk.Label(
-            self._badge_row, text="", font=("Segoe UI", 7, "bold"),
+            self._badge_row, text="", font=(UI_FONT, 7, "bold"),
             anchor="w", padx=3, pady=0,
         )
 
         # PR title (becomes the main title for PR-mode rows, opens PR page)
         self._pr_title_lbl = tk.Label(
-            centre, text="", font=("Segoe UI", 9),
+            centre, text="", font=(UI_FONT, 9),
             bg=bg, fg=FG_TEXT, anchor="w", cursor="hand2",
         )
         self._pr_title_lbl.bind("<Button-1>", self._open_pr)
 
         # Line 3: status text
         self._info_lbl = tk.Label(
-            centre, text="", font=("Segoe UI", 8),
+            centre, text="", font=(UI_FONT, 8),
             bg=bg, fg=FG_MUTED, anchor="w",
         )
         self._info_lbl.pack(fill=tk.X)
 
         # Snooze badge (shown in badge row when snoozed)
         self._snooze_lbl = tk.Label(
-            self._badge_row, text="SNOOZED", font=("Segoe UI", 7, "bold"),
+            self._badge_row, text="SNOOZED", font=(UI_FONT, 7, "bold"),
             bg="#3D3530", fg="#A8A29E", anchor="w", padx=4, pady=0,
         )
 
@@ -2054,7 +2090,7 @@ class WorkflowRow:
         # Right-click context menu
         self._ctx_menu = tk.Menu(self.frame, tearoff=0, bg=BG_ROW, fg=FG_TEXT,
                                  activebackground="#4A3728", activeforeground=FG_TEXT,
-                                 font=("Segoe UI", 9))
+                                 font=(UI_FONT, 9))
         self._ctx_menu.add_command(label="Snooze", command=self._toggle_snooze)
         self.frame.bind("<Button-3>", self._show_ctx_menu)
         # Bind on all child widgets too so right-click works anywhere on the row
@@ -2196,13 +2232,7 @@ class WorkflowRow:
                 self._jira_lbl.pack_forget()
 
             if s.review_status:
-                _review_cfg = {
-                    "approved":          ("APPROVED",          "#1C3A2A", "#4ADE80"),
-                    "changes_requested": ("CHANGES REQUESTED", "#3A1C1C", "#F87171"),
-                    "commented":         ("IN REVIEW",         "#1C2A3A", "#60A5FA"),
-                    "pending":           ("REVIEW PENDING",    "#3D3530", "#FBBF24"),
-                }
-                text, bg_col, fg_col = _review_cfg.get(
+                text, bg_col, fg_col = _REVIEW_BADGE_CFG.get(
                     s.review_status, ("REVIEW PENDING", "#3D3530", "#FBBF24")
                 )
                 self._review_lbl.config(text=text, bg=bg_col, fg=fg_col)
@@ -2212,12 +2242,7 @@ class WorkflowRow:
                 self._review_lbl.pack_forget()
 
             if s.staleness_level and s.pr_updated_at:
-                _stale_cfg = {
-                    "slightly_stale":   ("#3D3520", "#EAB308"),
-                    "moderately_stale": ("#3A2A1C", "#F97316"),
-                    "very_stale":       ("#3A1C1C", "#EF4444"),
-                }
-                bg_col, fg_col = _stale_cfg.get(s.staleness_level, ("#3D3520", "#EAB308"))
+                bg_col, fg_col = _STALENESS_BADGE_CFG.get(s.staleness_level, ("#3D3520", "#EAB308"))
                 age = _format_age(s.pr_updated_at)
                 self._stale_lbl.config(text=f"STALE {age}" if age else "STALE", bg=bg_col, fg=fg_col)
                 self._stale_lbl.pack(side=tk.LEFT, padx=(0, 4))
@@ -2282,6 +2307,9 @@ class StartupManager:
     @staticmethod
     def _exe_cmd() -> str:
         """Return the command to launch this script at startup."""
+        if getattr(sys, "frozen", False):
+            # Frozen .exe — just run the executable directly
+            return f'"{sys.executable}"'
         exe = sys.executable  # pythonw.exe or python.exe
         # Prefer pythonw.exe so no console window appears
         pythonw = Path(exe).parent / "pythonw.exe"
@@ -2388,8 +2416,15 @@ class UpdateChecker:
             if resp.status_code != 200:
                 return None
             data = resp.json()
-            release_sha = data.get("target_commitish", "")[:7]
-            if release_sha and release_sha != BUILD_COMMIT:
+            commitish = data.get("target_commitish", "")
+            # target_commitish may be a branch name (e.g. "main") or a SHA.
+            # Only compare as SHA if it looks like one (hex, >= 7 chars).
+            if re.fullmatch(r"[0-9a-f]{7,}", commitish):
+                release_sha = commitish[:7]
+            else:
+                # Branch name — can't compare to BUILD_COMMIT, treat as new release
+                release_sha = None
+            if release_sha is None or release_sha != BUILD_COMMIT:
                 UpdateChecker._release_data = data
                 return data.get("tag_name", release_sha)
         except Exception:
@@ -2491,12 +2526,12 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
 
     tk.Label(
         dlg, text="A new version of Actions Monitor is available.",
-        font=("Segoe UI", 11, "bold"), bg=BG_DARK, fg=FG_TEXT,
+        font=(UI_FONT, 11, "bold"), bg=BG_DARK, fg=FG_TEXT,
     ).pack(**pad, pady=(16, 6))
 
     tk.Label(
         dlg, text=f"New version: {commit_hash}",
-        font=("Segoe UI", 9), bg=BG_DARK, fg=FG_MUTED,
+        font=(UI_FONT, 9), bg=BG_DARK, fg=FG_MUTED,
     ).pack(**pad, pady=(0, 4))
 
     if getattr(sys, "frozen", False):
@@ -2505,13 +2540,13 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
         link_text, link_url = "View README on GitHub", f"{UpdateChecker.REPO_URL}#readme"
     link = tk.Label(
         dlg, text=link_text,
-        font=("Segoe UI", 9, "underline"), bg=BG_DARK, fg=FG_LINK,
+        font=(UI_FONT, 9, "underline"), bg=BG_DARK, fg=FG_LINK,
         cursor="hand2",
     )
     link.pack(**pad, pady=(0, 10))
     link.bind("<Button-1>", lambda _: webbrowser.open(link_url))
 
-    status_lbl = tk.Label(dlg, text="", font=("Segoe UI", 9), bg=BG_DARK, fg=FG_MUTED)
+    status_lbl = tk.Label(dlg, text="", font=(UI_FONT, 9), bg=BG_DARK, fg=FG_MUTED)
     status_lbl.pack(**pad, pady=(0, 4))
 
     btn_frame = tk.Frame(dlg, bg=BG_DARK)
@@ -2539,14 +2574,14 @@ def _show_update_dialog(root: tk.Tk, commit_hash: str):
         threading.Thread(target=_run, daemon=True).start()
 
     update_btn = tk.Button(
-        btn_frame, text="Update", font=("Segoe UI", 10),
+        btn_frame, text="Update", font=(UI_FONT, 10),
         bg=ACCENT, fg=FG_TEXT, activebackground=BG_ROW, activeforeground=FG_TEXT,
         relief=tk.FLAT, padx=16, pady=4, cursor="hand2", command=do_update,
     )
     update_btn.pack(side=tk.LEFT, padx=(0, 8))
 
     skip_btn = tk.Button(
-        btn_frame, text="Skip", font=("Segoe UI", 10),
+        btn_frame, text="Skip", font=(UI_FONT, 10),
         bg=ACCENT, fg=FG_MUTED, activebackground=BG_ROW, activeforeground=FG_TEXT,
         relief=tk.FLAT, padx=16, pady=4, cursor="hand2", command=dlg.destroy,
     )
@@ -2576,7 +2611,6 @@ def _get_monitor_work_areas() -> list[tuple[int, int, int, int]]:
         )
 
         def callback(hmonitor, hdc, lprect, lparam):
-            info = ctypes.wintypes.RECT()
             # MONITORINFO struct: cbSize (DWORD), rcMonitor (RECT), rcWork (RECT), dwFlags (DWORD)
             class MONITORINFO(ctypes.Structure):
                 _fields_ = [
@@ -2629,7 +2663,7 @@ def _attach_tooltip(widget: tk.Widget, text: str, delay: int = 400):
             tip = tk.Toplevel(widget)
             tip.wm_overrideredirect(True)
             lbl = tk.Label(tip, text=text, bg="#292524", fg=FG_TEXT,
-                           font=("Segoe UI", 8), padx=6, pady=3,
+                           font=(UI_FONT, 8), padx=6, pady=3,
                            relief="solid", borderwidth=1, highlightthickness=0)
             lbl.pack()
             tip.update_idletasks()
@@ -2693,8 +2727,7 @@ class MainWindow:
         self._root.resizable(True, True)
         self._root.geometry("560x420")
         self._root.minsize(400, 200)
-        self._restore_window_state()
-        self._restore_collapse_state()
+        self._restore_all_state()
 
         _init_status_icons()
         _init_snooze_icons()
@@ -2726,7 +2759,6 @@ class MainWindow:
         header.pack_propagate(False)
 
         # Summit logo
-        import base64, io
         logo_data = base64.b64decode(_SUMMIT_LOGO_B64)
         logo_img = Image.open(io.BytesIO(logo_data))
         # Scale to 28px height for the header
@@ -2743,7 +2775,7 @@ class MainWindow:
         _attach_tooltip(logo_lbl, "summit.nl")
 
         tk.Label(
-            header, text=APP_NAME, font=("Segoe UI", 12),
+            header, text=APP_NAME, font=(UI_FONT, 12),
             bg=BG_DARK, fg=FG_TEXT,
         ).pack(side=tk.LEFT, padx=(10, 16), pady=10)
 
@@ -2762,9 +2794,9 @@ class MainWindow:
         # Column headers
         hdr = tk.Frame(self._root, bg=BG_DARK)
         hdr.pack(fill=tk.X, padx=14, pady=(6, 2))
-        tk.Label(hdr, text="STATUS / WORKFLOW", font=("Segoe UI", 7, "bold"),
+        tk.Label(hdr, text="STATUS / WORKFLOW", font=(UI_FONT, 7, "bold"),
                  bg=BG_DARK, fg=FG_MUTED, anchor="w").pack(side=tk.LEFT, expand=True, fill=tk.X)
-        tk.Label(hdr, text="POLL", font=("Segoe UI", 7, "bold"),
+        tk.Label(hdr, text="POLL", font=(UI_FONT, 7, "bold"),
                  bg=BG_DARK, fg=FG_MUTED, width=12, anchor="e").pack(side=tk.RIGHT)
 
         # Scrollable workflow list
@@ -2800,7 +2832,12 @@ class MainWindow:
 
         def _on_mousewheel(e):
             canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
+        def _on_mousewheel_linux(e, direction):
+            canvas.yview_scroll(direction, "units")
         canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        if IS_LINUX:
+            canvas.bind_all("<Button-4>", lambda e: _on_mousewheel_linux(e, -3))
+            canvas.bind_all("<Button-5>", lambda e: _on_mousewheel_linux(e, 3))
 
         self._canvas = canvas
 
@@ -2818,11 +2855,11 @@ class MainWindow:
         tk.Label(
             footer_row1,
             text="Edit config.yaml to add/change workflows.",
-            font=("Segoe UI", 8), bg=ACCENT, fg=FG_MUTED,
+            font=(UI_FONT, 8), bg=ACCENT, fg=FG_MUTED,
         ).pack(side=tk.LEFT)
 
         open_btn = tk.Label(
-            footer_row1, text="Open config ↗", font=("Segoe UI", 8, "bold"),
+            footer_row1, text="Open config ↗", font=(UI_FONT, 8, "bold"),
             bg=ACCENT, fg=FG_LINK, cursor="hand2",
         )
         open_btn.pack(side=tk.RIGHT)
@@ -2839,7 +2876,7 @@ class MainWindow:
                 text="Start with Windows",
                 variable=self._startup_var,
                 command=self._toggle_startup,
-                font=("Segoe UI", 8),
+                font=(UI_FONT, 8),
                 bg=ACCENT, fg=FG_MUTED,
                 activebackground=ACCENT, activeforeground=FG_TEXT,
                 selectcolor=BG_DARK,
@@ -2848,8 +2885,22 @@ class MainWindow:
             startup_cb.pack(side=tk.LEFT)
         else:
             tk.Label(
-                footer_row2, text="", bg=ACCENT, font=("Segoe UI", 8),
+                footer_row2, text="", bg=ACCENT, font=(UI_FONT, 8),
             ).pack(side=tk.LEFT)
+
+        self._aot_var = tk.BooleanVar(value=self._root.attributes('-topmost'))
+        aot_cb = tk.Checkbutton(
+            footer_row2,
+            text="Always on top",
+            variable=self._aot_var,
+            command=self._toggle_always_on_top,
+            font=(UI_FONT, 8),
+            bg=ACCENT, fg=FG_MUTED,
+            activebackground=ACCENT, activeforeground=FG_TEXT,
+            selectcolor=BG_DARK,
+            relief=tk.FLAT, bd=0,
+        )
+        aot_cb.pack(side=tk.LEFT, padx=(12, 0))
 
     # ------------------------------------------------------------------
     # Startup toggle
@@ -2859,6 +2910,54 @@ class MainWindow:
             StartupManager.enable()
         else:
             StartupManager.disable()
+
+    # ------------------------------------------------------------------
+    # Always on top
+    # ------------------------------------------------------------------
+    def _toggle_always_on_top(self):
+        on_top = self._aot_var.get()
+        self._root.attributes('-topmost', on_top)
+        try:
+            state = self._load_state()
+            state["always_on_top"] = on_top
+            self._write_state(state)
+        except Exception:
+            pass
+
+    def _restore_all_state(self):
+        """Restore window geometry, collapse state, and always-on-top from a single state.json read."""
+        try:
+            state = self._load_state()
+        except Exception:
+            return
+        # Collapse state
+        for title in state.get("collapsed_sections", []):
+            self._collapsed[title] = True
+        # Always on top
+        on_top = state.get("always_on_top", False)
+        self._root.attributes('-topmost', on_top)
+        # Window geometry
+        win = state.get("window")
+        if not win:
+            return
+        try:
+            x = int(win["x"])
+            y = int(win["y"])
+            w = max(int(win["width"]), 400)
+            h = max(int(win["height"]), 200)
+            areas = _get_monitor_work_areas() if IS_WINDOWS else []
+            if areas and not _rect_overlaps(x, y, w, h, areas):
+                self._root.geometry(f"{w}x{h}")
+                return
+            if not areas:
+                sw = self._root.winfo_screenwidth()
+                sh = self._root.winfo_screenheight()
+                if x + w < 100 or x > sw - 100 or y + h < 50 or y > sh - 50:
+                    self._root.geometry(f"{w}x{h}")
+                    return
+            self._root.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception as exc:
+            print(f"[State] Restore error: {exc}")
 
     # ------------------------------------------------------------------
     # Sections
@@ -2875,12 +2974,12 @@ class MainWindow:
         hdr.pack(fill=tk.X, padx=12, pady=(10, 4))
 
         indicator = tk.Label(hdr, text="▸" if is_collapsed else "▾",
-                             font=("Segoe UI", 9, "bold"),
+                             font=(UI_FONT, 9, "bold"),
                              bg=BG_DARK, fg=FG_LINK, anchor="w")
         indicator.pack(side=tk.LEFT, padx=(0, 4))
         self._section_indicators[title] = indicator
 
-        title_lbl = tk.Label(hdr, text=title, font=("Segoe UI", 9, "bold"),
+        title_lbl = tk.Label(hdr, text=title, font=(UI_FONT, 9, "bold"),
                              bg=BG_DARK, fg=FG_LINK, anchor="w")
         title_lbl.pack(side=tk.LEFT)
 
@@ -2897,12 +2996,12 @@ class MainWindow:
         sort_bar = tk.Frame(content, bg=BG_ROW)
         sort_bar.pack(fill=tk.X, padx=4, pady=(2, 0))
 
-        tk.Label(sort_bar, text="SORT:", font=("Segoe UI", 8, "bold"),
+        tk.Label(sort_bar, text="SORT:", font=(UI_FONT, 8, "bold"),
                  bg=BG_ROW, fg=FG_TEXT, padx=6, pady=3).pack(side=tk.LEFT)
 
         labels: dict[str, tk.Label] = {}
         for sk in ("status", "updated", "created"):
-            lbl = tk.Label(sort_bar, text=f"{sk.capitalize()} ·", font=("Segoe UI", 8),
+            lbl = tk.Label(sort_bar, text=f"{sk.capitalize()} ·", font=(UI_FONT, 8),
                            bg=BG_ROW, fg=FG_MUTED, cursor="hand2", padx=6, pady=3)
             lbl.pack(side=tk.LEFT)
             lbl.bind("<Button-1>", lambda _e, t=title, k=sk: self._cycle_sort(t, k))
@@ -2910,7 +3009,7 @@ class MainWindow:
         self._sort_labels[title] = labels
 
         # Clear button
-        clear_lbl = tk.Label(sort_bar, text="✕", font=("Segoe UI", 8),
+        clear_lbl = tk.Label(sort_bar, text="✕", font=(UI_FONT, 8),
                              bg=BG_ROW, fg=FG_MUTED, cursor="hand2", padx=8, pady=3)
         clear_lbl.pack(side=tk.RIGHT)
         clear_lbl.bind("<Button-1>", lambda _e, t=title: self._clear_sort(t))
@@ -2953,8 +3052,6 @@ class MainWindow:
     # ------------------------------------------------------------------
     # Section sorting
     # ------------------------------------------------------------------
-    _SORT_KEYS = ("status", "updated", "created")
-
     def _cycle_sort(self, title: str, sort_key: str):
         """Cycle sort for a section+key: None → asc → desc → None. Only one sort active globally."""
         current = self._section_sort.get(title)
@@ -3031,20 +3128,7 @@ class MainWindow:
             row.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
             bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
             row._bg = bg
-            row.frame.config(bg=bg)
-            for widget in row.frame.winfo_children():
-                if widget is row._accent:
-                    continue
-                try:
-                    widget.config(bg=bg)
-                except tk.TclError:
-                    pass
-                if isinstance(widget, tk.Frame):
-                    for child in widget.winfo_children():
-                        try:
-                            child.config(bg=bg)
-                        except tk.TclError:
-                            pass
+            self._set_row_bg(row, bg)
 
     def _update_sort_labels(self):
         """Refresh all sort label text and colors to reflect current state."""
@@ -3194,7 +3278,8 @@ class MainWindow:
                 self._apply_event(event)
         except queue.Empty:
             pass
-        self._check_focus_signal()
+        if IS_WINDOWS:
+            self._check_focus_signal()
         self._root.after(500, self._drain_queue)
 
     def _apply_event(self, event: StatusEvent):
@@ -3267,16 +3352,17 @@ class MainWindow:
             _snoozed_keys.discard(key)
 
     def _restripe_rows(self):
-        """Recalculate alternating row backgrounds after a row is removed."""
-        for i, row in enumerate(self._rows.values()):
-            bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
-            row._bg = bg
-            row.frame.config(bg=bg)
-            for widget in row.frame.winfo_children():
-                try:
-                    widget.config(bg=bg)
-                except tk.TclError:
-                    pass
+        """Recalculate alternating row backgrounds per-section after a row is removed."""
+        # Group rows by their section container
+        section_rows: dict[int, list[WorkflowRow]] = {}
+        for (wid, _sub), row in self._rows.items():
+            cid = id(self._wid_container.get(wid, self._list_frame))
+            section_rows.setdefault(cid, []).append(row)
+        for rows in section_rows.values():
+            for i, row in enumerate(rows):
+                bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
+                row._bg = bg
+                self._set_row_bg(row, bg)
 
     # ------------------------------------------------------------------
     # Config hot-reload
@@ -3285,7 +3371,7 @@ class MainWindow:
         changed = self._config_mgr.load()
         if changed:
             self._reload_pollers()
-        self._root.after(2000, self._watch_config)
+        self._root.after(5000, self._watch_config)
 
 
     def _reload_pollers(self):
@@ -3354,49 +3440,11 @@ class MainWindow:
         except Exception as exc:
             print(f"[State] Save error: {exc}")
 
-    def _restore_collapse_state(self):
-        """Load collapsed section titles from state.json."""
-        try:
-            state = self._load_state()
-            for title in state.get("collapsed_sections", []):
-                self._collapsed[title] = True
-        except Exception:
-            pass
-
-    def _restore_window_state(self):
-        """Restore window geometry from state.json, clamped to visible monitors."""
-        try:
-            state = self._load_state()
-            win = state.get("window")
-            if not win:
-                return
-
-            x = int(win["x"])
-            y = int(win["y"])
-            w = max(int(win["width"]), 400)
-            h = max(int(win["height"]), 200)
-
-            # Check visibility against monitor work areas
-            areas = _get_monitor_work_areas()
-            if areas and not _rect_overlaps(x, y, w, h, areas):
-                # Window would be off-screen — keep size but reset position
-                self._root.geometry(f"{w}x{h}")
-                return
-
-            if not areas:
-                # Fallback: single-monitor check via tkinter
-                sw = self._root.winfo_screenwidth()
-                sh = self._root.winfo_screenheight()
-                if x + w < 100 or x > sw - 100 or y + h < 50 or y > sh - 50:
-                    self._root.geometry(f"{w}x{h}")
-                    return
-
-            self._root.geometry(f"{w}x{h}+{x}+{y}")
-        except Exception as exc:
-            print(f"[State] Restore error: {exc}")
-
     def _hide_window(self):
-        self._root.withdraw()
+        if self._tray:
+            self._root.withdraw()
+        else:
+            self._root.iconify()
 
     def _show_window(self):
         self._root.deiconify()
@@ -3447,7 +3495,7 @@ class MainWindow:
                         pass
 
     def _on_unmap(self, event):
-        if event.widget is self._root:
+        if event.widget is self._root and self._tray:
             self._root.withdraw()
 
     def _quit(self):
@@ -3455,11 +3503,12 @@ class MainWindow:
         self._stop_all_pollers()
         if self._tray:
             self._tray.stop()
-        for f in (_FOCUS_SIGNAL, _FOCUS_VBS):
-            try:
-                f.unlink(missing_ok=True)
-            except OSError:
-                pass
+        if IS_WINDOWS:
+            for f in (_FOCUS_SIGNAL, _FOCUS_VBS):
+                try:
+                    f.unlink(missing_ok=True)
+                except OSError:
+                    pass
         self._root.destroy()
 
     def run(self):
@@ -3489,6 +3538,28 @@ def main():
 
     if IS_WINDOWS:
         _ensure_focus_vbs()
+
+    # Warn about missing Linux system libraries (non-blocking — user can dismiss)
+    if IS_LINUX and _LINUX_MISSING:
+        _warn_root = tk.Tk()
+        _warn_root.withdraw()
+        import tkinter.messagebox as _mb
+        _mb.showwarning(
+            "Actions Monitor — Missing System Libraries",
+            "The following system packages are missing or could not be loaded:\n\n"
+            + "\n".join(f"  • {p}" for p in _LINUX_MISSING)
+            + "\n\nThe app will still start, but the tray icon and/or notification "
+            "sounds may not work.\n\n"
+            "Install with:\n"
+            "  sudo apt-get install " + " ".join(
+                p for p in _LINUX_MISSING if not p.startswith("pulseaudio")
+                and not p.startswith("alsa")
+            ).strip()
+            + ("\n  sudo apt-get install pulseaudio-utils  # or alsa-utils"
+               if any("paplay" in p or "aplay" in p for p in _LINUX_MISSING) else ""),
+        )
+        _warn_root.destroy()
+
     config_mgr  = ConfigManager()
 
     # Check for updates before starting the main UI
@@ -3502,12 +3573,15 @@ def main():
     event_queue: queue.Queue = queue.Queue()
 
     win  = MainWindow(config_mgr, event_queue)
-    tray = TrayManager(win.show_callback, win.quit_callback)
-    win.set_tray(tray)
-    tray.start()
-
-    # Update tray icon immediately with initial (unknown) states
-    tray.update(list(win._states.values()))
+    try:
+        tray = TrayManager(win.show_callback, win.quit_callback)
+        win.set_tray(tray)
+        tray.start()
+        # Update tray icon immediately with initial (unknown) states
+        tray.update(list(win._states.values()))
+    except Exception as exc:
+        print(f"[Tray] Failed to start tray icon: {exc}")
+        print("[Tray] App will run without a system tray icon.")
 
     win.run()
 
