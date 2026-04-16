@@ -2,6 +2,8 @@
 
 ### 2026-04-16
 
+- **Fix run timestamps showing UTC instead of local time** — the time displayed next to run numbers (e.g. "16 Apr 14:30") was parsed without timezone conversion, causing it to be offset from the user's local time. Now properly converts from UTC to the system's local timezone.
+
 - **Immediate merged PR removal** — PR-mode rows for merged/closed PRs are now removed on the next poll cycle instead of waiting for the 5-minute stale timeout. The stale timeout is preserved as a fallback for edge cases (API failures, `max_prs` truncation).
 - **Fix open PR filter bug** — when `_fetch_user_open_prs()` API call failed, the empty-set guard skipped run filtering entirely, causing merged PR rows to persist indefinitely. Now tracks API success separately so the filter works correctly even when the user has zero open PRs.
 - **Linux system dependency check** — on startup, checks for required system libraries (GTK3, AppIndicator, paplay/aplay). Shows a dismissible warning dialog listing missing packages with install instructions. App continues running regardless.

@@ -2192,8 +2192,9 @@ class WorkflowRow:
             status_txt = f"{status_txt}  —  run #{s.run_number}"
             if s.started_at:
                 try:
-                    dt = datetime.fromisoformat(s.started_at.rstrip("Z"))
-                    status_txt += f"  ({dt.strftime('%d %b %H:%M')})"
+                    dt = datetime.fromisoformat(s.started_at.replace("Z", "+00:00"))
+                    dt_local = dt.astimezone()
+                    status_txt += f"  ({dt_local.strftime('%d %b %H:%M')})"
                 except Exception:
                     pass
 
