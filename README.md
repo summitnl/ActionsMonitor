@@ -147,7 +147,7 @@ notifications:
     sound: none
 ```
 
-## Status colours
+### Status colours
 
 | Colour | Meaning |
 |--------|---------|
@@ -158,14 +158,14 @@ notifications:
 
 The tray icon follows the same logic, showing the worst state across all configured workflows.
 
-## Updating
+### Updating
 
 The app checks for updates automatically on startup:
 
 - **Binary builds** check GitHub Releases for a newer version. If found, a dialog offers to download and install the update in-place.
 - **Running from source** uses `git fetch` to detect new commits. If behind, a dialog offers to pull and restart.
 
-### Development setup
+## Development setup
 
 If you want to run from source instead of the binary:
 
@@ -197,4 +197,3 @@ cp dist/ActionsMonitor-linux .
 Disable **Start with Windows** in the app footer, then delete the folder.
 
 If you used the development setup, run `src\dev-uninstall.bat` to also remove the startup registry entry and Python packages.
-
