@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/summit.svg" alt="Summit" height="35">
+  <a href="https://summit.nl"><img src="docs/summit.svg" alt="Summit" height="35"></a>
 </p>
 
 # Actions Monitor
