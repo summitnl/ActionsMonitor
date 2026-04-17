@@ -31,8 +31,11 @@ import stat
 import base64
 import io
 
-import tkinter as tk
-from tkinter import ttk
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
+    QVBoxLayout, QHBoxLayout, QFrame, QScrollArea, QCheckBox, QMenu,
+    QDialog, QSystemTrayIcon, QMessageBox, QPushButton, QSizePolicy)
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QEvent
+from PySide6.QtGui import QPixmap, QImage, QIcon, QCursor, QFont, QColor, QMouseEvent
 
 # ---------------------------------------------------------------------------
 # Dependency checks
@@ -47,18 +50,14 @@ try:
 except ImportError:
     _missing.append("pyyaml")
 try:
-    from PIL import Image, ImageDraw, ImageFont, ImageTk
+    from PIL import Image, ImageDraw, ImageFont
 except ImportError:
     _missing.append("Pillow")
-try:
-    import pystray
-except ImportError:
-    _missing.append("pystray")
 
 if _missing:
-    import tkinter.messagebox as mb
-    root = tk.Tk(); root.withdraw()
-    mb.showerror(
+    _app = QApplication(sys.argv)
+    QMessageBox.critical(
+        None,
         "Actions Monitor — Missing Dependencies",
         "Please install the required packages:\n\n"
         f"  pip install {' '.join(_missing)}\n\n"
@@ -88,18 +87,9 @@ if IS_WINDOWS:
     # Tell Windows to identify this process as "Actions Monitor" rather than "Python"
     ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Summit.ActionsMonitor")
 
-# Linux system dependency check — warn about missing libs needed for tray/notifications
+# Linux system dependency check — warn about missing sound tools
 _LINUX_MISSING: list[str] = []
 if IS_LINUX:
-    import importlib
-    for _gi_mod, _pkg in [("gi", "gir1.2-gtk-3.0"),
-                          ("gi.repository.Gtk", "gir1.2-gtk-3.0"),
-                          ("gi.repository.AyatanaAppIndicator3", "gir1.2-ayatanaappindicator3-0.1")]:
-        try:
-            importlib.import_module(_gi_mod)
-        except (ImportError, ValueError):
-            if _pkg not in _LINUX_MISSING:
-                _LINUX_MISSING.append(_pkg)
     if not shutil.which("paplay") and not shutil.which("aplay"):
         _LINUX_MISSING.append("pulseaudio-utils (paplay) or alsa-utils (aplay)")
 
@@ -107,7 +97,6 @@ if IS_LINUX:
 # Constants
 # ---------------------------------------------------------------------------
 APP_NAME    = "Actions Monitor"
-APP_VERSION = "1.0"
 
 try:
     from version import BUILD_COMMIT
@@ -214,6 +203,9 @@ _FOCUS_VBS     = _APP_DIR / "_focus.vbs"
 _FOCUS_SIGNAL  = _APP_DIR / "_focus_signal"
 
 
+_FOCUS_SH = _APP_DIR / "_focus.sh"
+
+
 def _ensure_focus_vbs():
     """Create a small VBScript that writes a signal file when executed (silent, no CMD flash)."""
     script = (
@@ -221,6 +213,16 @@ def _ensure_focus_vbs():
         f'fso.CreateTextFile "{_FOCUS_SIGNAL}", True\n'
     )
     _FOCUS_VBS.write_text(script, encoding="utf-8")
+
+
+def _ensure_focus_sh():
+    """Create a small shell script that writes a signal file when executed (Linux).
+    Note: currently unused — plyer notifications on Linux don't support a launch
+    callback, so clicking a toast won't trigger this script. Created for future
+    use when a Linux notification backend with launch support is added."""
+    script = f'#!/bin/sh\ntouch "{_FOCUS_SIGNAL}"\n'
+    _FOCUS_SH.write_text(script, encoding="utf-8")
+    _FOCUS_SH.chmod(_FOCUS_SH.stat().st_mode | stat.S_IEXEC)
 
 POLL_DEFAULT = 60  # seconds
 
@@ -485,12 +487,22 @@ def parse_actor_url(url: str) -> tuple[str, str, Optional[str]]:
     return owner, repo, actor
 
 
+def _github_api_get(url: str, token: str, session: Optional[requests.Session] = None,
+                    params: Optional[dict] = None, timeout: int = 15):
+    """Perform a GitHub API GET request with standard headers."""
+    _get = (session or requests).get
+    resp = _get(url, params=params, headers=_gh_headers(token), timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def fetch_latest_run(
     owner: str,
     repo: str,
     workflow_file: str,
     branch: Optional[str],
     token: str,
+    session: Optional[requests.Session] = None,
 ) -> Optional[dict]:
     """Fetch the latest workflow run from the GitHub API."""
     api_url = (
@@ -500,10 +512,7 @@ def fetch_latest_run(
     params: dict = {"per_page": 1}
     if branch:
         params["branch"] = branch
-
-    resp = requests.get(api_url, params=params, headers=_gh_headers(token), timeout=15)
-    resp.raise_for_status()
-    runs = resp.json().get("workflow_runs", [])
+    runs = _github_api_get(api_url, token, session, params).get("workflow_runs", [])
     return runs[0] if runs else None
 
 
@@ -514,7 +523,7 @@ _cached_github_username: Optional[str] = None
 _github_username_lock = threading.Lock()
 
 
-def fetch_github_username(token: str) -> Optional[str]:
+def fetch_github_username(token: str, session: Optional[requests.Session] = None) -> Optional[str]:
     """Fetch the authenticated user's login via GET /user. Cached after first call."""
     global _cached_github_username
     if not token:
@@ -522,12 +531,10 @@ def fetch_github_username(token: str) -> Optional[str]:
     with _github_username_lock:
         if _cached_github_username is not None:
             return _cached_github_username
-    resp = requests.get("https://api.github.com/user", headers=_gh_headers(token), timeout=15)
-    resp.raise_for_status()
-    login = resp.json().get("login")
-    with _github_username_lock:
+        # Hold lock through fetch to prevent duplicate API calls from concurrent pollers
+        login = _github_api_get("https://api.github.com/user", token, session).get("login")
         _cached_github_username = login
-    return login
+        return login
 
 
 def fetch_pr_runs(
@@ -537,6 +544,7 @@ def fetch_pr_runs(
     actor: str,
     token: str,
     per_page: int = 10,
+    session: Optional[requests.Session] = None,
 ) -> list[dict]:
     """Fetch recent workflow runs filtered by actor and pull_request event."""
     api_url = (
@@ -544,9 +552,7 @@ def fetch_pr_runs(
         f"/actions/workflows/{workflow_file}/runs"
     )
     params = {"actor": actor, "event": "pull_request", "per_page": per_page}
-    resp = requests.get(api_url, params=params, headers=_gh_headers(token), timeout=15)
-    resp.raise_for_status()
-    return resp.json().get("workflow_runs", [])
+    return _github_api_get(api_url, token, session, params).get("workflow_runs", [])
 
 
 def fetch_actor_runs(
@@ -556,15 +562,14 @@ def fetch_actor_runs(
     token: str,
     per_page: int = 20,
     conclusion: Optional[str] = None,
+    session: Optional[requests.Session] = None,
 ) -> list[dict]:
     """Fetch recent workflow runs for a user across all workflows in a repo."""
     api_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
     params: dict = {"actor": actor, "per_page": per_page}
     if conclusion:
         params["conclusion"] = conclusion
-    resp = requests.get(api_url, params=params, headers=_gh_headers(token), timeout=15)
-    resp.raise_for_status()
-    return resp.json().get("workflow_runs", [])
+    return _github_api_get(api_url, token, session, params).get("workflow_runs", [])
 
 
 # Known branch prefixes for display tagging
@@ -638,7 +643,6 @@ class WorkflowState:
     run_number:  Optional[int] = None
     started_at:  Optional[str] = None
     run_updated_at: Optional[str] = None  # ISO 8601 from GitHub run API (last status change)
-    conclusion:  Optional[str] = None
     last_check:  Optional[datetime] = None
     error:       Optional[str] = None
     # PR mode fields
@@ -671,6 +675,32 @@ class StatusEvent:
 # ---------------------------------------------------------------------------
 # Notifications
 # ---------------------------------------------------------------------------
+
+# Candidate default sound files for Linux, searched in XDG data dirs
+_LINUX_SOUND_CANDIDATES = [
+    "sounds/freedesktop/stereo/message.oga",
+    "sounds/freedesktop/stereo/complete.oga",
+    "sounds/alsa/Front_Left.wav",
+]
+_linux_default_sound_cache: Optional[str] = None
+
+
+def _find_linux_default_sound() -> Optional[str]:
+    """Search XDG data dirs for a usable notification sound file."""
+    global _linux_default_sound_cache
+    if _linux_default_sound_cache is not None:
+        return _linux_default_sound_cache or None
+    xdg_dirs = os.environ.get("XDG_DATA_DIRS", "/usr/local/share:/usr/share").split(":")
+    for d in xdg_dirs:
+        for candidate in _LINUX_SOUND_CANDIDATES:
+            path = os.path.join(d, candidate)
+            if os.path.isfile(path):
+                _linux_default_sound_cache = path
+                return path
+    _linux_default_sound_cache = ""  # sentinel: searched but not found
+    return None
+
+
 _NOTIF_TYPE_PRIORITY: dict[str, int] = {"success": 1, "new_run": 2, "failure": 3}
 
 @dataclass
@@ -840,19 +870,23 @@ class NotificationManager:
                     pass
         elif IS_LINUX:
             if sound_cfg == "default":
-                for cmd in [["paplay", "/usr/share/sounds/freedesktop/stereo/message.oga"],
-                             ["aplay",  "/usr/share/sounds/alsa/Front_Left.wav"]]:
+                sound_file = _find_linux_default_sound()
+                if sound_file:
+                    for player in ("paplay", "aplay"):
+                        try:
+                            subprocess.Popen([player, sound_file],
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                            break
+                        except FileNotFoundError:
+                            continue
+            else:
+                for player in ("paplay", "aplay"):
                     try:
-                        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        subprocess.Popen([player, sound_cfg],
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
                         break
                     except FileNotFoundError:
                         continue
-            else:
-                try:
-                    subprocess.Popen(["paplay", sound_cfg],
-                                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                except FileNotFoundError:
-                    pass
 
 
 NOTIF = NotificationManager()
@@ -894,6 +928,7 @@ class WorkflowPoller(threading.Thread):
         self.branch = cfg_branch if cfg_branch else url_branch
 
         self.name_display = cfg_entry.get("name") or wf_file or url
+        self._session = requests.Session()
         self._prev_run_id    : Optional[int] = None
         self._prev_status    : Optional[str] = None
 
@@ -903,6 +938,27 @@ class WorkflowPoller(threading.Thread):
     def trigger_poll(self):
         """Wake the poller to re-poll immediately."""
         self._poll_now.set()
+
+    def _detect_notification(self, prev_run_id, cur_run_id, prev_api_status, cur_api_status, resolved_status) -> Optional[str]:
+        """Determine notification type from a run state transition.
+        Returns 'new_run', 'success', 'failure', or None."""
+        if prev_run_id is not None and cur_run_id != prev_run_id:
+            return "new_run"
+        if (cur_run_id == prev_run_id
+                and cur_api_status == "completed"
+                and prev_api_status != "completed"):
+            if resolved_status == ST_SUCCESS:
+                return "success"
+            if resolved_status == ST_FAILURE:
+                return "failure"
+        return None
+
+    def _remove_sub_key(self, sk: str):
+        """Send a removal event and clean up tracking state for a sub_key."""
+        branch_part = sk.split("#")[0] if "#" in sk else sk
+        dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""),
+                              branch=branch_part)
+        self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=sk, removed=True))
 
     def _emit_error(self, error: str = "", branch=None, sub_key=None):
         """Emit a ST_UNKNOWN state with an optional error message."""
@@ -944,7 +1000,7 @@ class WorkflowPoller(threading.Thread):
             return
 
         try:
-            run = fetch_latest_run(self.owner, self.repo, self.wf_file, self.branch, token)
+            run = fetch_latest_run(self.owner, self.repo, self.wf_file, self.branch, token, session=self._session)
         except requests.HTTPError as exc:
             self._emit_error(f"HTTP {exc.response.status_code}", branch=self.branch)
             return
@@ -970,21 +1026,10 @@ class WorkflowPoller(threading.Thread):
         state.run_number = run.get("run_number")
         state.started_at = run.get("run_started_at") or run.get("created_at")
         state.run_updated_at = run.get("updated_at")
-        state.conclusion = conclusion
 
         # Determine what notification to send
-        notif_type: Optional[str] = None
-        if self._prev_run_id is not None and run_id != self._prev_run_id:
-            notif_type = "new_run"
-        elif (
-            run_id == self._prev_run_id
-            and api_status == "completed"
-            and self._prev_status != "completed"
-        ):
-            if state.status == ST_SUCCESS:
-                notif_type = "success"
-            elif state.status == ST_FAILURE:
-                notif_type = "failure"
+        notif_type = self._detect_notification(
+            self._prev_run_id, run_id, self._prev_status, api_status, state.status)
 
         self._prev_run_id     = run_id
         self._prev_status     = api_status
@@ -1059,6 +1104,25 @@ class PRWorkflowPoller(WorkflowPoller):
         self._last_seen:       dict[str, datetime] = {}
         # PR detail cache: pr_number → {draft: bool}
         self._pr_cache: dict[int, dict] = {}
+        # Review status cache: pr_number → (status, fetch_time)
+        self._review_cache: dict[int, tuple[Optional[str], float]] = {}
+        self._review_cache_ttl: float = 120.0  # seconds — reviews change less often than CI
+        # Parsed staleness thresholds (refreshed on each poll from config)
+        self._staleness_thresholds: list[tuple[int, str]] = self._parse_staleness(config_mgr.get())
+
+    @staticmethod
+    def _parse_staleness(cfg: dict) -> list[tuple[int, str]]:
+        """Parse staleness thresholds from config, sorted descending by duration."""
+        stale_cfg = cfg.get("staleness_thresholds", {})
+        return sorted(
+            [
+                (parse_duration(stale_cfg.get("very_stale", "5d")), "very_stale"),
+                (parse_duration(stale_cfg.get("moderately_stale", "3d")), "moderately_stale"),
+                (parse_duration(stale_cfg.get("slightly_stale", "1d")), "slightly_stale"),
+            ],
+            key=lambda t: t[0],
+            reverse=True,
+        )
 
     def _cache_pr(self, pr_num: int, pr_data: dict):
         """Update the PR cache from a PR API response dict."""
@@ -1074,21 +1138,12 @@ class PRWorkflowPoller(WorkflowPoller):
         token = cfg.get("github_token", "")
         notif_cfg = cfg.get("notifications", {})
 
-        # Staleness thresholds (sorted descending so highest is checked first)
-        stale_cfg = cfg.get("staleness_thresholds", {})
-        staleness_thresholds = sorted(
-            [
-                (parse_duration(stale_cfg.get("very_stale", "5d")), "very_stale"),
-                (parse_duration(stale_cfg.get("moderately_stale", "3d")), "moderately_stale"),
-                (parse_duration(stale_cfg.get("slightly_stale", "1d")), "slightly_stale"),
-            ],
-            key=lambda t: t[0],
-            reverse=True,
-        )
+        # Refresh staleness thresholds from config (cheap parse, avoids stale cache)
+        self._staleness_thresholds = self._parse_staleness(cfg)
 
         # Resolve username
         try:
-            username = fetch_github_username(token)
+            username = fetch_github_username(token, session=self._session)
         except Exception as exc:
             self._emit_error(f"Cannot resolve GitHub user: {exc}")
             return
@@ -1107,7 +1162,7 @@ class PRWorkflowPoller(WorkflowPoller):
             try:
                 runs = fetch_pr_runs(
                     self.owner, self.repo, wf_file, username, token,
-                    per_page=self._max_prs * 2,
+                    per_page=self._max_prs * 2, session=self._session,
                 )
                 all_runs.extend(runs)
             except requests.HTTPError as exc:
@@ -1250,7 +1305,6 @@ class PRWorkflowPoller(WorkflowPoller):
                 state.run_number = run.get("run_number")
                 state.started_at = run.get("run_started_at") or run.get("created_at")
                 state.run_updated_at = run.get("updated_at")
-                state.conclusion = run.get("conclusion")
 
                 # Parse branch prefix
                 prefix, short = parse_branch_prefix(branch_name)
@@ -1277,7 +1331,7 @@ class PRWorkflowPoller(WorkflowPoller):
                         try:
                             updated_dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
                             age_secs = (datetime.now(updated_dt.tzinfo) - updated_dt).total_seconds()
-                            for threshold_secs, level in staleness_thresholds:
+                            for threshold_secs, level in self._staleness_thresholds:
                                 if age_secs >= threshold_secs:
                                     state.staleness_level = level
                                     break
@@ -1324,18 +1378,15 @@ class PRWorkflowPoller(WorkflowPoller):
                 self._remove_sub_key(sk)
 
     def _fetch_user_open_prs(self, username: str, token: str) -> list[dict]:
-        """Fetch open PRs authored by the user. Returns list of {number, branch, base_ref}."""
+        """Fetch open PRs authored by the user. Returns list of {number, branch, base_ref}.
+        Uses the creator= API filter to avoid fetching all repo PRs."""
         url = (
             f"https://api.github.com/repos/{self.owner}/{self.repo}"
             f"/pulls?state=open&sort=updated&direction=desc&per_page=50"
+            f"&creator={username}"
         )
-        resp = requests.get(url, headers=_gh_headers(token), timeout=15)
-        resp.raise_for_status()
         results = []
-        for pr in resp.json():
-            author = pr.get("user", {}).get("login", "")
-            if author.lower() != username.lower():
-                continue
+        for pr in _github_api_get(url, token, self._session):
             pr_num = pr.get("number")
             if pr_num:
                 branch = pr.get("head", {}).get("ref", "")
@@ -1351,9 +1402,7 @@ class PRWorkflowPoller(WorkflowPoller):
             f"/actions/workflows/{wf_file}/runs"
         )
         params = {"branch": branch, "per_page": 1}
-        resp = requests.get(url, params=params, headers=_gh_headers(token), timeout=15)
-        resp.raise_for_status()
-        return resp.json().get("workflow_runs", [])
+        return _github_api_get(url, token, self._session, params).get("workflow_runs", [])
 
     def _fetch_prs_for_branch(self, branch: str, token: str) -> list[dict]:
         """Fetch open PRs for a head branch. Returns list of {number, base_ref}."""
@@ -1362,10 +1411,8 @@ class PRWorkflowPoller(WorkflowPoller):
                 f"https://api.github.com/repos/{self.owner}/{self.repo}"
                 f"/pulls?head={self.owner}:{branch}&state=open&per_page=10"
             )
-            resp = requests.get(url, headers=_gh_headers(token), timeout=15)
-            resp.raise_for_status()
             results = []
-            for pr in resp.json():
+            for pr in _github_api_get(url, token, self._session):
                 pr_num = pr.get("number")
                 if pr_num:
                     self._cache_pr(pr_num, pr)
@@ -1375,25 +1422,41 @@ class PRWorkflowPoller(WorkflowPoller):
             return []
 
     def _remove_sub_key(self, sk: str):
-        """Send a removal event and clean up tracking state for a sub_key."""
-        branch_part = sk.split("#")[0] if "#" in sk else sk
-        dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=branch_part)
-        self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=sk, removed=True))
+        super()._remove_sub_key(sk)
         self._last_seen.pop(sk, None)
         self._prev_run_ids.pop(sk, None)
         self._prev_statuses.pop(sk, None)
+        # Evict PR caches for the removed sub_key's PR number
+        pr_num = self._pr_num_from_sub_key(sk)
+        if pr_num is not None:
+            self._pr_cache.pop(pr_num, None)
+            self._review_cache.pop(pr_num, None)
+
+    @staticmethod
+    def _pr_num_from_sub_key(sk: str) -> Optional[int]:
+        """Extract the PR number from a sub_key like 'branch#123'."""
+        if "#" in sk:
+            try:
+                return int(sk.rsplit("#", 1)[1])
+            except (ValueError, IndexError):
+                pass
+        return None
 
     def _fetch_pr_review_status(self, pr_number: int, token: str) -> Optional[str]:
         """Fetch the aggregate review status for a PR.
-        Returns 'approved', 'changes_requested', 'commented', 'pending', or None."""
+        Returns 'approved', 'changes_requested', 'commented', 'pending', or None.
+        Cached for _review_cache_ttl seconds to reduce API calls."""
+        cached = self._review_cache.get(pr_number)
+        if cached is not None:
+            status, fetch_time = cached
+            if time.monotonic() - fetch_time < self._review_cache_ttl:
+                return status
         try:
             url = (
                 f"https://api.github.com/repos/{self.owner}/{self.repo}"
                 f"/pulls/{pr_number}/reviews"
             )
-            resp = requests.get(url, headers=_gh_headers(token), timeout=15)
-            resp.raise_for_status()
-            reviews = resp.json()
+            reviews = _github_api_get(url, token, self._session)
 
             # Keep only the latest review per reviewer (ignore PENDING/DISMISSED)
             latest: dict[str, str] = {}
@@ -1407,12 +1470,15 @@ class PRWorkflowPoller(WorkflowPoller):
                     has_comments = True
 
             if not latest:
-                return "commented" if has_comments else "pending"
-            if "CHANGES_REQUESTED" in latest.values():
-                return "changes_requested"
-            return "approved"
+                result = "commented" if has_comments else "pending"
+            elif "CHANGES_REQUESTED" in latest.values():
+                result = "changes_requested"
+            else:
+                result = "approved"
+            self._review_cache[pr_number] = (result, time.monotonic())
+            return result
         except Exception:
-            return None
+            return cached[0] if cached else None
 
 
 # ---------------------------------------------------------------------------
@@ -1446,7 +1512,7 @@ class ActorWorkflowPoller(WorkflowPoller):
 
         # Resolve username
         try:
-            username = fetch_github_username(token)
+            username = fetch_github_username(token, session=self._session)
         except Exception as exc:
             self._emit_error(f"Cannot resolve GitHub user: {exc}")
             return
@@ -1462,7 +1528,7 @@ class ActorWorkflowPoller(WorkflowPoller):
         try:
             runs = fetch_actor_runs(
                 self.owner, self.repo, username, token,
-                per_page=self._max_runs * 3,
+                per_page=self._max_runs * 3, session=self._session,
                 conclusion=conclusion_filter,
             )
         except requests.HTTPError as exc:
@@ -1512,7 +1578,6 @@ class ActorWorkflowPoller(WorkflowPoller):
             state.run_number = run.get("run_number")
             state.started_at = run.get("run_started_at") or run.get("created_at")
             state.run_updated_at = run.get("updated_at")
-            state.conclusion = conclusion
 
             # Parse branch prefix
             if hb:
@@ -1522,20 +1587,9 @@ class ActorWorkflowPoller(WorkflowPoller):
                 state.jira_key = extract_jira_key(hb)
 
             # Determine notification
-            notif_type: Optional[str] = None
-            prev_rid = self._prev_run_ids.get(composite_key)
-            prev_st  = self._prev_statuses.get(composite_key)
-            if prev_rid is not None and run_id != prev_rid:
-                notif_type = "new_run"
-            elif (
-                run_id == prev_rid
-                and api_status == "completed"
-                and prev_st != "completed"
-            ):
-                if state.status == ST_SUCCESS:
-                    notif_type = "success"
-                elif state.status == ST_FAILURE:
-                    notif_type = "failure"
+            notif_type = self._detect_notification(
+                self._prev_run_ids.get(composite_key), run_id,
+                self._prev_statuses.get(composite_key), api_status, state.status)
 
             self._prev_run_ids[composite_key]     = run_id
             self._prev_statuses[composite_key]    = api_status
@@ -1551,11 +1605,13 @@ class ActorWorkflowPoller(WorkflowPoller):
                 continue
             elapsed = (now - self._last_seen[key]).total_seconds()
             if elapsed >= self._stale_after:
-                dummy = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
-                self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=key, removed=True))
-                del self._last_seen[key]
-                self._prev_run_ids.pop(key, None)
-                self._prev_statuses.pop(key, None)
+                self._remove_sub_key(key)
+
+    def _remove_sub_key(self, sk: str):
+        super()._remove_sub_key(sk)
+        self._last_seen.pop(sk, None)
+        self._prev_run_ids.pop(sk, None)
+        self._prev_statuses.pop(sk, None)
 
 
 # ---------------------------------------------------------------------------
@@ -1707,10 +1763,7 @@ def _make_status_icon(status: str, size: int = 32) -> Image.Image:
 
 def _make_refresh_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
     """Lucide rotate-cw icon: circular arrow in the given colour."""
-    ss = 4
-    hi = size * ss
-    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    img, draw, hi = _icon_base(size)
     sw = max(3, round(hi / 16 * 2.2))
     cx, cy = hi / 2, hi / 2
     r = hi * 0.36
@@ -1734,13 +1787,19 @@ def _make_refresh_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
 
 _SNOOZE_ICON_SIZE = 24
 
+
+def _draw_z_glyph(draw: ImageDraw.Draw, x: int, y: int, w: int, h: int,
+                   colour: str, width: int):
+    """Draw a single Z glyph (three strokes: top, diagonal, bottom)."""
+    draw.line([(x, y), (x + w, y)], fill=colour, width=width)
+    draw.line([(x + w, y), (x, y + h)], fill=colour, width=width)
+    draw.line([(x, y + h), (x + w, y + h)], fill=colour, width=width)
+
+
 def _make_snooze_icon(size: int = _SNOOZE_ICON_SIZE, bg_colour: str = "#3D3530",
                       fg_colour: str = "#A8A29E") -> Image.Image:
     """Zzz icon on a filled circle background for the snooze button."""
-    ss = 4
-    hi = size * ss
-    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    img, draw, hi = _icon_base(size)
     # Background circle
     pad = int(hi * 0.02)
     draw.ellipse([pad, pad, hi - pad, hi - pad], fill=bg_colour)
@@ -1753,51 +1812,51 @@ def _make_snooze_icon(size: int = _SNOOZE_ICON_SIZE, bg_colour: str = "#3D3530",
     # Large Z (bottom-left area)
     zw, zh = int(iw * 0.50), int(iw * 0.32)
     zx, zy = inset, inset + int(iw * 0.55)
-    draw.line([(zx, zy), (zx + zw, zy)], fill=c, width=sw)
-    draw.line([(zx + zw, zy), (zx, zy + zh)], fill=c, width=sw)
-    draw.line([(zx, zy + zh), (zx + zw, zy + zh)], fill=c, width=sw)
+    _draw_z_glyph(draw, zx, zy, zw, zh, c, sw)
     # Medium Z (middle area)
     zw2, zh2 = int(zw * 0.60), int(zh * 0.60)
     zx2, zy2 = inset + int(iw * 0.28), inset + int(iw * 0.22)
-    draw.line([(zx2, zy2), (zx2 + zw2, zy2)], fill=c, width=sw)
-    draw.line([(zx2 + zw2, zy2), (zx2, zy2 + zh2)], fill=c, width=sw)
-    draw.line([(zx2, zy2 + zh2), (zx2 + zw2, zy2 + zh2)], fill=c, width=sw)
+    _draw_z_glyph(draw, zx2, zy2, zw2, zh2, c, sw)
     # Small Z (top-right area)
     zw3, zh3 = int(zw * 0.35), int(zh * 0.35)
     zx3, zy3 = inset + int(iw * 0.52), inset + int(iw * 0.02)
-    draw.line([(zx3, zy3), (zx3 + zw3, zy3)], fill=c, width=sw)
-    draw.line([(zx3 + zw3, zy3), (zx3, zy3 + zh3)], fill=c, width=sw)
-    draw.line([(zx3, zy3 + zh3), (zx3 + zw3, zy3 + zh3)], fill=c, width=sw)
+    _draw_z_glyph(draw, zx3, zy3, zw3, zh3, c, sw)
     return img.resize((size, size), Image.LANCZOS)
 
 
-_snooze_tk_icons: dict[str, ImageTk.PhotoImage] = {}
+def _pil_to_qpixmap(pil_img: Image.Image) -> QPixmap:
+    """Convert a PIL Image to a QPixmap."""
+    img = pil_img.convert("RGBA")
+    data = img.tobytes("raw", "RGBA")
+    qimg = QImage(data, img.width, img.height, img.width * 4, QImage.Format.Format_RGBA8888)
+    return QPixmap.fromImage(qimg)
+
+
+_snooze_qpixmaps: dict[str, QPixmap] = {}
+
+
+_SNOOZE_ICON_STYLES = {
+    "normal":       ("#3D3530", "#A8A29E"),
+    "hover":        ("#4A3728", "#FBBF24"),
+    "active":       ("#92400E", "#FEF3C7"),
+    "active_hover": ("#78350F", "#FFFFFF"),
+}
 
 
 def _init_snooze_icons():
-    """Generate snooze/unsnooze button icons (normal + hover). Call after Tk root exists."""
-    if _snooze_tk_icons:
+    """Generate snooze/unsnooze button icons (normal + hover). Call after QApplication exists."""
+    if _snooze_qpixmaps:
         return
-    # Snooze (muted) — normal and hover
-    _snooze_tk_icons["normal"] = ImageTk.PhotoImage(
-        _make_snooze_icon(bg_colour="#3D3530", fg_colour="#A8A29E"))
-    _snooze_tk_icons["hover"] = ImageTk.PhotoImage(
-        _make_snooze_icon(bg_colour="#4A3728", fg_colour="#FBBF24"))
-    # Unsnooze (active/amber) — normal and hover
-    _snooze_tk_icons["active"] = ImageTk.PhotoImage(
-        _make_snooze_icon(bg_colour="#92400E", fg_colour="#FEF3C7"))
-    _snooze_tk_icons["active_hover"] = ImageTk.PhotoImage(
-        _make_snooze_icon(bg_colour="#78350F", fg_colour="#FFFFFF"))
+    for key, (bg, fg) in _SNOOZE_ICON_STYLES.items():
+        _snooze_qpixmaps[key] = _pil_to_qpixmap(
+            _make_snooze_icon(bg_colour=bg, fg_colour=fg))
 
 
 # --- App / tray icon (play triangle on dark rounded rect + status dot) ---
 
 def _make_base_icon(size: int = 64) -> Image.Image:
     """App icon: amber play triangle on dark rounded-rect background."""
-    ss = 4
-    hi = size * ss
-    img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
+    img, draw, hi = _icon_base(size)
 
     pad = hi // 16
     radius = hi // 4
@@ -1877,41 +1936,6 @@ def _combined_status(states: list[WorkflowState]) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Tray icon
-# ---------------------------------------------------------------------------
-class TrayManager:
-    def __init__(self, show_cb, quit_cb):
-        self._show_cb  = show_cb
-        self._quit_cb  = quit_cb
-        self._icons    = {s: _make_icon_image(c) for s, c in COLOUR.items()}
-        self._icon     = pystray.Icon(
-            APP_NAME,
-            self._icons[ST_UNKNOWN],
-            APP_NAME,
-            menu=pystray.Menu(
-                pystray.MenuItem("Show",          lambda: self._show_cb(), default=True),
-                pystray.Menu.SEPARATOR,
-                pystray.MenuItem("Quit",          lambda: self._quit_cb()),
-            ),
-        )
-        self._thread   = threading.Thread(target=self._icon.run, daemon=True, name="tray")
-
-    def start(self):
-        self._thread.start()
-
-    def update(self, states: list[WorkflowState]):
-        combined = _combined_status(states)
-        self._icon.icon  = self._icons[combined]
-        self._icon.title = f"{APP_NAME} — {combined.replace('_', ' ').title()}"
-
-    def stop(self):
-        try:
-            self._icon.stop()
-        except Exception:
-            pass
-
-
-# ---------------------------------------------------------------------------
 # Workflow row widget
 # ---------------------------------------------------------------------------
 STATUS_LABEL = {
@@ -1924,222 +1948,229 @@ STATUS_LABEL = {
     ST_SKIPPED:  "Skipped",
 }
 
-# Pre-generated status icon PhotoImages (populated once the Tk root exists)
-_status_tk_icons: dict[str, ImageTk.PhotoImage] = {}
+# Pre-generated status icon QPixmaps (populated once QApplication exists)
+_status_qpixmaps: dict[str, QPixmap] = {}
 _ICON_SIZE = 24  # px for row status icons
 
 
 def _init_status_icons():
-    """Generate and cache PhotoImage icons for all statuses. Call after Tk root exists."""
-    if _status_tk_icons:
+    """Generate and cache QPixmap icons for all statuses. Call after QApplication exists."""
+    if _status_qpixmaps:
         return
     for st in (ST_UNKNOWN, ST_QUEUED, ST_RUNNING, ST_SUCCESS,
                ST_FAILURE, ST_CANCELLED, ST_SKIPPED):
         img = _make_status_icon(st, _ICON_SIZE)
-        _status_tk_icons[st] = ImageTk.PhotoImage(img)
+        _status_qpixmaps[st] = _pil_to_qpixmap(img)
 
 
-class WorkflowRow:
+class _ClickableLabel(QLabel):
+    """QLabel that opens a URL on click and shows a hand cursor."""
+    def __init__(self, *args, url_fn=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._url_fn = url_fn
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
 
-    def __init__(self, parent: tk.Frame, wid: int, state: WorkflowState, alt: bool,
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._url_fn:
+            url = self._url_fn()
+            if url:
+                webbrowser.open(url)
+
+
+def _make_badge(text: str, bg: str, fg: str, bold: bool = False) -> QLabel:
+    """Create a small badge label with styled background."""
+    lbl = QLabel(text)
+    weight = "bold" if bold else "normal"
+    lbl.setStyleSheet(
+        f"background-color: {bg}; color: {fg}; font-size: 9px; font-weight: {weight}; "
+        f"padding: 0px 3px; border-radius: 2px;"
+    )
+    lbl.setVisible(False)
+    return lbl
+
+
+class WorkflowRow(QWidget):
+
+    def __init__(self, parent: QWidget, wid: int, state: WorkflowState, alt: bool,
                  jira_base_url: str = "", sub_key: Optional[str] = None,
                  snooze_cb: Optional[callable] = None):
-        self.wid    = wid
+        super().__init__(parent)
+        self.wid = wid
         self._sub_key = sub_key
         self._state = state
         self._jira_base_url = jira_base_url
         self._snooze_cb = snooze_cb
         self._snoozed = False
-        bg = BG_ROW_ALT if alt else BG_ROW
+        self._bg = BG_ROW_ALT if alt else BG_ROW
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_right_click)
 
-        self.frame = tk.Frame(parent, bg=bg)
-        self.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
+        main_layout = QHBoxLayout(self)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Left accent bar (coloured strip indicating status)
-        self._accent = tk.Frame(self.frame, bg=COLOUR[state.status], width=3)
-        self._accent.pack(side=tk.LEFT, fill=tk.Y)
+        # Left accent bar
+        self._accent = QFrame()
+        self._accent.setFixedWidth(3)
+        self._accent.setStyleSheet(f"background-color: {COLOUR[state.status]};")
+        main_layout.addWidget(self._accent)
 
-        # Left column: status icon + snooze button stacked vertically
-        self._left_col = tk.Frame(self.frame, bg=bg)
-        self._left_col.pack(side=tk.LEFT, padx=(12, 10), pady=(8, 4))
+        # Left column: icon + snooze
+        left_col = QVBoxLayout()
+        left_col.setContentsMargins(12, 8, 10, 4)
+        left_col.setSpacing(4)
 
-        # Status icon (Lucide-style image)
-        icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
-        self._icon_lbl = tk.Label(self._left_col, image=icon, bg=bg)
-        self._icon_lbl.image = icon  # prevent GC
-        self._icon_lbl.pack()
+        self._icon_lbl = QLabel()
+        pixmap = _status_qpixmaps.get(state.status, _status_qpixmaps.get(ST_UNKNOWN))
+        self._icon_lbl.setPixmap(pixmap)
+        self._icon_lbl.setFixedSize(24, 24)
+        left_col.addWidget(self._icon_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
 
-        # Snooze button (Zzz icon) — shown only for failed rows
-        self._snooze_btn = tk.Label(
-            self._left_col, image=_snooze_tk_icons.get("normal"), bg=bg, cursor="hand2",
-        )
-        self._snooze_btn.image = _snooze_tk_icons.get("normal")
-        self._snooze_btn.bind("<Button-1>", lambda _: self._toggle_snooze())
-        self._snooze_btn.bind("<Enter>", self._snooze_hover_enter)
-        self._snooze_btn.bind("<Leave>", self._snooze_hover_leave)
-        _attach_tooltip(self._snooze_btn, "Snooze — dim this row and exclude from tray status")
-        # (packed/hidden dynamically in _update_labels based on status)
+        # Snooze button
+        self._snooze_btn = QLabel()
+        self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
+        self._snooze_btn.setFixedSize(24, 24)
+        self._snooze_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._snooze_btn.setToolTip("Snooze — dim this row and exclude from tray status")
+        self._snooze_btn.mousePressEvent = lambda e: self._toggle_snooze()
+        self._snooze_btn.enterEvent = lambda e: self._snooze_hover_enter()
+        self._snooze_btn.leaveEvent = lambda e: self._snooze_hover_leave()
+        self._snooze_btn.setVisible(False)
+        left_col.addWidget(self._snooze_btn, 0, Qt.AlignmentFlag.AlignHCenter)
+        main_layout.addLayout(left_col)
 
-        # Right side — polling rate (pack before centre so it reserves space)
-        self._poll_lbl = tk.Label(
-            self.frame, text="", font=(UI_FONT, 8),
-            bg=bg, fg=FG_MUTED, anchor="ne",
-        )
-        self._poll_lbl.pack(side=tk.RIGHT, padx=(4, 12), anchor="n", pady=(10, 0))
+        # Centre column
+        centre = QVBoxLayout()
+        centre.setContentsMargins(0, 8, 0, 6)
+        centre.setSpacing(0)
 
-        # Centre column (fills remaining space)
-        centre = tk.Frame(self.frame, bg=bg)
-        centre.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, pady=(8, 6))
+        # PR title (shown above top_row for PR mode)
+        self._pr_title_lbl = _ClickableLabel(
+            url_fn=lambda: self._state.pr_url)
+        self._pr_title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+        self._pr_title_lbl.setMinimumWidth(0)
+        self._pr_title_lbl.setVisible(False)
+        centre.addWidget(self._pr_title_lbl)
 
-        # Line 1: workflow name + PR number + branch (becomes subtitle in PR mode)
-        self._top_row = tk.Frame(centre, bg=bg)
-        self._top_row.pack(fill=tk.X)
+        # Top row: name + branch
+        top_row = QHBoxLayout()
+        top_row.setContentsMargins(0, 0, 0, 0)
+        top_row.setSpacing(0)
 
-        self._name_lbl = tk.Label(
-            self._top_row, text=state.name, font=(UI_FONT, 9),
-            bg=bg, fg=FG_TEXT, cursor="hand2", anchor="w",
-        )
-        self._name_lbl.pack(side=tk.LEFT)
-        self._name_lbl.bind("<Button-1>", self._open_url)
+        self._name_lbl = _ClickableLabel(
+            state.name, url_fn=lambda: self._state.run_url or self._state.url)
+        self._name_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+        self._name_lbl.setMinimumWidth(0)
+        top_row.addWidget(self._name_lbl, 1)
 
-        # Separator " / " between workflow name and PR info (hidden for non-PR)
-        self._sep_lbl = tk.Label(
-            self._top_row, text=" / ", font=(UI_FONT, 9),
-            bg=bg, fg=FG_MUTED, anchor="w",
-        )
+        self._branch_lbl = _ClickableLabel(
+            url_fn=lambda: self._state.run_url or self._state.url)
+        self._branch_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        self._branch_lbl.setMinimumWidth(0)
+        self._branch_lbl.setVisible(False)
+        top_row.addWidget(self._branch_lbl, 1)
 
-        # PR number + branch short name (subtitle in PR mode, opens build run)
-        self._branch_lbl = tk.Label(
-            self._top_row, text="", font=(UI_FONT, 8),
-            bg=bg, fg=FG_MUTED, cursor="hand2", anchor="w",
-        )
-        self._branch_lbl.bind("<Button-1>", self._open_url)
+        top_row.addStretch()
+        centre.addLayout(top_row)
 
-        # Line 2 (optional): badges row — prefix badge + DRAFT badge
-        self._badge_row = tk.Frame(centre, bg=bg)
-        # (only packed when badges are present)
+        # Badge row
+        badge_layout = QHBoxLayout()
+        badge_layout.setContentsMargins(0, 2, 0, 0)
+        badge_layout.setSpacing(4)
 
-        self._prefix_lbl = tk.Label(
-            self._badge_row, text="", font=(UI_FONT, 7),
-            bg="#3D3530", fg="#FBBF24", anchor="w", padx=3, pady=0,
-        )
+        self._prefix_lbl = _make_badge("", "#3D3530", "#FBBF24")
+        badge_layout.addWidget(self._prefix_lbl)
 
-        self._draft_lbl = tk.Label(
-            self._badge_row, text="DRAFT", font=(UI_FONT, 7, "bold"),
-            bg="#92400E", fg="#FEF3C7", anchor="w", padx=4, pady=0,
-        )
+        self._draft_lbl = _make_badge("DRAFT", "#92400E", "#FEF3C7", bold=True)
+        badge_layout.addWidget(self._draft_lbl)
 
-        self._jira_lbl = tk.Label(
-            self._badge_row, text="", font=(UI_FONT, 7),
-            bg="#302830", fg="#A78BFA", anchor="w", padx=3, pady=0,
-            cursor="hand2",
-        )
-        self._jira_lbl.bind("<Button-1>", self._open_jira)
+        self._jira_lbl = _make_badge("", "#302830", "#A78BFA")
+        self._jira_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._jira_lbl.mousePressEvent = lambda e: self._open_jira()
+        badge_layout.addWidget(self._jira_lbl)
 
-        # Review status badge (APPROVED / CHANGES REQUESTED / REVIEW PENDING)
-        self._review_lbl = tk.Label(
-            self._badge_row, text="", font=(UI_FONT, 7),
-            anchor="w", padx=3, pady=0,
-        )
+        self._review_lbl = _make_badge("", "#3D3530", "#FBBF24")
+        badge_layout.addWidget(self._review_lbl)
 
-        # Staleness badge (STALE 3d)
-        self._stale_lbl = tk.Label(
-            self._badge_row, text="", font=(UI_FONT, 7, "bold"),
-            anchor="w", padx=3, pady=0,
-        )
+        self._stale_lbl = _make_badge("", "#3D3520", "#EAB308", bold=True)
+        badge_layout.addWidget(self._stale_lbl)
 
-        # PR title (becomes the main title for PR-mode rows, opens PR page)
-        self._pr_title_lbl = tk.Label(
-            centre, text="", font=(UI_FONT, 9),
-            bg=bg, fg=FG_TEXT, anchor="w", cursor="hand2",
-        )
-        self._pr_title_lbl.bind("<Button-1>", self._open_pr)
+        self._snooze_lbl = _make_badge("SNOOZED", "#3D3530", "#A8A29E", bold=True)
+        badge_layout.addWidget(self._snooze_lbl)
 
-        # Line 3: status text
-        self._info_lbl = tk.Label(
-            centre, text="", font=(UI_FONT, 8),
-            bg=bg, fg=FG_MUTED, anchor="w",
-        )
-        self._info_lbl.pack(fill=tk.X)
+        badge_layout.addStretch()
+        self._badge_widget = QWidget()
+        self._badge_widget.setLayout(badge_layout)
+        self._badge_widget.setVisible(False)
+        centre.addWidget(self._badge_widget)
 
-        # Snooze badge (shown in badge row when snoozed)
-        self._snooze_lbl = tk.Label(
-            self._badge_row, text="SNOOZED", font=(UI_FONT, 7, "bold"),
-            bg="#3D3530", fg="#A8A29E", anchor="w", padx=4, pady=0,
-        )
+        # Status info line
+        self._info_lbl = QLabel()
+        self._info_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        self._info_lbl.setMinimumWidth(0)
+        centre.addWidget(self._info_lbl)
 
-        self._bg = bg
+        main_layout.addLayout(centre, 1)
+
+        # Right column: poll rate (fixed width, never pushed off-screen)
+        self._poll_lbl = QLabel()
+        self._poll_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        self._poll_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
+        self._poll_lbl.setContentsMargins(4, 10, 12, 0)
+        self._poll_lbl.setMinimumWidth(70)
+        self._poll_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        main_layout.addWidget(self._poll_lbl)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self._apply_background()
         self._update_labels()
 
-        # Cache all bg-configurable widgets (avoids winfo_children on every bg change)
-        self._bg_widgets: list[tk.Widget] = []
-        for widget in self.frame.winfo_children():
-            if widget is self._accent:
-                continue
-            self._bg_widgets.append(widget)
-            if isinstance(widget, tk.Frame):
-                for child in widget.winfo_children():
-                    self._bg_widgets.append(child)
+    def _apply_background(self):
+        self.setStyleSheet(
+            f"WorkflowRow {{ background-color: {self._bg}; }}"
+        )
 
-        # Right-click — bind all widgets to propagate to shared context menu
-        self.frame.bind("<Button-3>", self._on_right_click)
-        for widget in self._bg_widgets:
-            widget.bind("<Button-3>", self._on_right_click)
-
-    def _on_right_click(self, event):
+    def _on_right_click(self, pos):
         if self._snooze_cb:
-            self._snooze_cb((self.wid, self._sub_key), event)
+            self._snooze_cb((self.wid, self._sub_key), self.mapToGlobal(pos))
 
     def _toggle_snooze(self):
         if self._snooze_cb:
             self._snooze_cb((self.wid, self._sub_key), None)
 
-    def _snooze_hover_enter(self, _event=None):
+    def _snooze_hover_enter(self):
         key = "active_hover" if self._snoozed else "hover"
-        icon = _snooze_tk_icons.get(key)
-        if icon:
-            self._snooze_btn.config(image=icon)
-            self._snooze_btn.image = icon
+        pm = _snooze_qpixmaps.get(key)
+        if pm:
+            self._snooze_btn.setPixmap(pm)
 
-    def _snooze_hover_leave(self, _event=None):
+    def _snooze_hover_leave(self):
         key = "active" if self._snoozed else "normal"
-        icon = _snooze_tk_icons.get(key)
-        if icon:
-            self._snooze_btn.config(image=icon)
-            self._snooze_btn.image = icon
+        pm = _snooze_qpixmaps.get(key)
+        if pm:
+            self._snooze_btn.setPixmap(pm)
 
     def set_snoozed(self, snoozed: bool):
         self._snoozed = snoozed
+        dimmed = "#78716C"
         if snoozed:
-            # Dim accent bar and text
-            self._accent.config(bg="#57534E")  # stone-600
-            self._icon_lbl.config(state="disabled")
-            self._info_lbl.config(fg="#78716C")  # stone-500
-            self._name_lbl.config(fg="#78716C")
-            self._poll_lbl.config(fg="#78716C")
-            self._branch_lbl.config(fg="#78716C")
-            self._pr_title_lbl.config(fg="#78716C")
+            self._accent.setStyleSheet(f"background-color: #57534E;")
+            self._info_lbl.setStyleSheet(f"color: {dimmed}; font-size: 11px;")
+            self._name_lbl.setStyleSheet(f"color: {dimmed}; font-size: 12px;")
+            self._poll_lbl.setStyleSheet(f"color: {dimmed}; font-size: 11px;")
+            self._branch_lbl.setStyleSheet(f"color: {dimmed}; font-size: 11px;")
+            self._pr_title_lbl.setStyleSheet(f"color: {dimmed}; font-size: 12px;")
         else:
-            # Restore normal colours
-            self._accent.config(bg=COLOUR.get(self._state.status, COLOUR[ST_UNKNOWN]))
-            self._icon_lbl.config(state="normal")
-            self._info_lbl.config(fg=FG_MUTED)
-            self._name_lbl.config(fg=FG_TEXT)
-            self._poll_lbl.config(fg=FG_MUTED)
-            self._branch_lbl.config(fg=FG_MUTED)
-            self._pr_title_lbl.config(fg=FG_TEXT)
+            self._accent.setStyleSheet(
+                f"background-color: {COLOUR.get(self._state.status, COLOUR[ST_UNKNOWN])};")
+            self._info_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+            self._name_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+            self._poll_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+            self._branch_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+            self._pr_title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
         self._update_labels()
 
-    def _open_url(self, _event=None):
-        url = self._state.run_url or self._state.url
-        if url:
-            webbrowser.open(url)
-
-    def _open_pr(self, _event=None):
-        if self._state.pr_url:
-            webbrowser.open(self._state.pr_url)
-
-    def _open_jira(self, _event=None):
+    def _open_jira(self):
         if self._jira_base_url and self._state.jira_key:
             webbrowser.open(f"{self._jira_base_url.rstrip('/')}/browse/{self._state.jira_key}")
 
@@ -2147,13 +2178,11 @@ class WorkflowRow:
         self._state = state
         self._jira_base_url = jira_base_url or self._jira_base_url
         if not self._snoozed:
-            # Update accent bar colour
-            self._accent.config(bg=COLOUR.get(state.status, COLOUR[ST_UNKNOWN]))
-            # Update status icon
-            icon = _status_tk_icons.get(state.status, _status_tk_icons.get(ST_UNKNOWN))
-            self._icon_lbl.config(image=icon)
-            self._icon_lbl.image = icon
-        self._poll_lbl.config(text=f"every {poll_rate}s")
+            self._accent.setStyleSheet(
+                f"background-color: {COLOUR.get(state.status, COLOUR[ST_UNKNOWN])};")
+            pixmap = _status_qpixmaps.get(state.status, _status_qpixmaps.get(ST_UNKNOWN))
+            self._icon_lbl.setPixmap(pixmap)
+        self._poll_lbl.setText(f"every {poll_rate}s")
         self._update_labels()
 
     def _update_labels(self):
@@ -2171,113 +2200,97 @@ class WorkflowRow:
                 except Exception:
                     pass
 
-        self._info_lbl.config(text=status_txt)
+        self._info_lbl.setText(status_txt)
 
-        # PR-mode labels — PR title is the main title (opens PR page),
-        # #number + branch is the subtitle (opens build run).
         has_badges = False
         if s.head_branch:
-            self._name_lbl.pack_forget()
-            self._sep_lbl.pack_forget()
+            self._name_lbl.setVisible(False)
 
-            # PR title as main title (above #number + branch)
+
             if s.pr_title:
-                self._pr_title_lbl.config(text=s.pr_title)
-                self._pr_title_lbl.pack(fill=tk.X, before=self._top_row)
+                self._pr_title_lbl.setText(s.pr_title)
+                self._pr_title_lbl.setVisible(True)
             else:
-                self._pr_title_lbl.pack_forget()
+                self._pr_title_lbl.setVisible(False)
 
-            # #number + branch as subtitle (opens build run)
             branch_text = s.branch_short or s.head_branch
             if s.pr_number:
                 branch_text = f"#{s.pr_number}  {branch_text}"
             if s.pr_target:
                 branch_text += f" \u2192 {s.pr_target}"
-            self._branch_lbl.config(text=branch_text)
-            self._branch_lbl.pack(side=tk.LEFT, padx=(0, 4))
+            self._branch_lbl.setText(branch_text)
+            self._branch_lbl.setVisible(True)
 
-            # Badges on their own line
             if s.branch_prefix:
-                self._prefix_lbl.config(text=s.branch_prefix)
-                self._prefix_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                self._prefix_lbl.setText(s.branch_prefix)
+                self._prefix_lbl.setVisible(True)
                 has_badges = True
             else:
-                self._prefix_lbl.pack_forget()
+                self._prefix_lbl.setVisible(False)
 
+            self._draft_lbl.setVisible(bool(s.is_draft))
             if s.is_draft:
-                self._draft_lbl.pack(side=tk.LEFT, padx=(0, 4))
                 has_badges = True
-            else:
-                self._draft_lbl.pack_forget()
 
             if s.jira_key and self._jira_base_url:
-                self._jira_lbl.config(text=s.jira_key)
-                self._jira_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                self._jira_lbl.setText(s.jira_key)
+                self._jira_lbl.setVisible(True)
                 has_badges = True
             else:
-                self._jira_lbl.pack_forget()
+                self._jira_lbl.setVisible(False)
 
             if s.review_status:
                 text, bg_col, fg_col = _REVIEW_BADGE_CFG.get(
-                    s.review_status, ("REVIEW PENDING", "#3D3530", "#FBBF24")
-                )
-                self._review_lbl.config(text=text, bg=bg_col, fg=fg_col)
-                self._review_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                    s.review_status, ("REVIEW PENDING", "#3D3530", "#FBBF24"))
+                self._review_lbl.setText(text)
+                self._review_lbl.setStyleSheet(
+                    f"background-color: {bg_col}; color: {fg_col}; font-size: 9px; "
+                    f"padding: 0px 3px; border-radius: 2px;")
+                self._review_lbl.setVisible(True)
                 has_badges = True
             else:
-                self._review_lbl.pack_forget()
+                self._review_lbl.setVisible(False)
 
             if s.staleness_level and s.pr_updated_at:
                 bg_col, fg_col = _STALENESS_BADGE_CFG.get(s.staleness_level, ("#3D3520", "#EAB308"))
                 age = _format_age(s.pr_updated_at)
-                self._stale_lbl.config(text=f"STALE {age}" if age else "STALE", bg=bg_col, fg=fg_col)
-                self._stale_lbl.pack(side=tk.LEFT, padx=(0, 4))
+                self._stale_lbl.setText(f"STALE {age}" if age else "STALE")
+                self._stale_lbl.setStyleSheet(
+                    f"background-color: {bg_col}; color: {fg_col}; font-size: 9px; "
+                    f"font-weight: bold; padding: 0px 3px; border-radius: 2px;")
+                self._stale_lbl.setVisible(True)
                 has_badges = True
             else:
-                self._stale_lbl.pack_forget()
+                self._stale_lbl.setVisible(False)
 
+            self._snooze_lbl.setVisible(self._snoozed)
             if self._snoozed:
-                self._snooze_lbl.pack(side=tk.LEFT, padx=(0, 4))
                 has_badges = True
-            else:
-                self._snooze_lbl.pack_forget()
 
-            if has_badges:
-                self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
-            else:
-                self._badge_row.pack_forget()
+            self._badge_widget.setVisible(has_badges)
         else:
-            self._name_lbl.pack(side=tk.LEFT)
-            self._sep_lbl.pack_forget()
-            self._branch_lbl.pack_forget()
-            self._prefix_lbl.pack_forget()
-            self._draft_lbl.pack_forget()
-            self._jira_lbl.pack_forget()
-            self._review_lbl.pack_forget()
-            self._stale_lbl.pack_forget()
-            self._pr_title_lbl.pack_forget()
+            self._name_lbl.setVisible(True)
 
-            # For non-PR rows, show SNOOZED badge if needed
-            if self._snoozed:
-                self._snooze_lbl.pack(side=tk.LEFT, padx=(0, 4))
-                self._badge_row.pack(fill=tk.X, pady=(2, 0), before=self._info_lbl)
-            else:
-                self._snooze_lbl.pack_forget()
-                self._badge_row.pack_forget()
+            self._branch_lbl.setVisible(False)
+            self._prefix_lbl.setVisible(False)
+            self._draft_lbl.setVisible(False)
+            self._jira_lbl.setVisible(False)
+            self._review_lbl.setVisible(False)
+            self._stale_lbl.setVisible(False)
+            self._pr_title_lbl.setVisible(False)
 
-        # Show snooze button below status icon for failed/snoozed rows
+            self._snooze_lbl.setVisible(self._snoozed)
+            self._badge_widget.setVisible(self._snoozed)
+
+        # Snooze button visibility
         if self._snoozed:
-            icon = _snooze_tk_icons.get("active")
-            self._snooze_btn.config(image=icon)
-            self._snooze_btn.image = icon
-            self._snooze_btn.pack(pady=(4, 0))
+            self._snooze_btn.setPixmap(_snooze_qpixmaps.get("active", QPixmap()))
+            self._snooze_btn.setVisible(True)
         elif s.status == ST_FAILURE:
-            icon = _snooze_tk_icons.get("normal")
-            self._snooze_btn.config(image=icon)
-            self._snooze_btn.image = icon
-            self._snooze_btn.pack(pady=(4, 0))
+            self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
+            self._snooze_btn.setVisible(True)
         else:
-            self._snooze_btn.pack_forget()
+            self._snooze_btn.setVisible(False)
 
 
 # ---------------------------------------------------------------------------
@@ -2405,14 +2418,18 @@ class UpdateChecker:
             commitish = data.get("target_commitish", "")
             # target_commitish may be a branch name (e.g. "main") or a SHA.
             # Only compare as SHA if it looks like one (hex, >= 7 chars).
+            tag_name = data.get("tag_name", "")
             if re.fullmatch(r"[0-9a-f]{7,}", commitish):
-                release_sha = commitish[:7]
+                # target_commitish is a SHA — compare directly
+                if commitish[:7] == BUILD_COMMIT:
+                    return None
             else:
-                # Branch name — can't compare to BUILD_COMMIT, treat as new release
-                release_sha = None
-            if release_sha is None or release_sha != BUILD_COMMIT:
-                UpdateChecker._release_data = data
-                return data.get("tag_name", release_sha)
+                # target_commitish is a branch name — compare tag_name to BUILD_COMMIT
+                # as a fallback (tag_name may be a version like "v1.2" or a short SHA)
+                if tag_name == BUILD_COMMIT:
+                    return None
+            UpdateChecker._release_data = data
+            return tag_name or commitish[:7]
         except Exception:
             pass
         return None
@@ -2499,124 +2516,125 @@ class UpdateChecker:
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
-def _show_update_dialog(root: tk.Tk, commit_hash: str):
-    """Show a modal dark-themed update dialog."""
-    dlg = tk.Toplevel(root)
-    dlg.title(f"{APP_NAME} — Update Available")
-    if APP_ICO.exists() and IS_WINDOWS:
-        dlg.iconbitmap(str(APP_ICO))
-    dlg.configure(bg=BG_DARK)
-    dlg.resizable(False, False)
+class UpdateDialog(QDialog):
+    """Modal dark-themed update dialog."""
+    def __init__(self, commit_hash: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"{APP_NAME} — Update Available")
+        self.setFixedSize(420, 240)
 
-    pad = {"padx": 20, "pady": 6}
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(6)
 
-    tk.Label(
-        dlg, text="A new version of Actions Monitor is available.",
-        font=(UI_FONT, 11, "bold"), bg=BG_DARK, fg=FG_TEXT,
-    ).pack(**pad, pady=(16, 6))
+        title = QLabel("A new version of Actions Monitor is available.")
+        title.setStyleSheet(f"color: {FG_TEXT}; font-size: 14px; font-weight: bold;")
+        layout.addWidget(title)
 
-    tk.Label(
-        dlg, text=f"New version: {commit_hash}",
-        font=(UI_FONT, 9), bg=BG_DARK, fg=FG_MUTED,
-    ).pack(**pad, pady=(0, 4))
+        version = QLabel(f"New version: {commit_hash}")
+        version.setStyleSheet(f"color: {FG_MUTED}; font-size: 12px;")
+        layout.addWidget(version)
 
-    if getattr(sys, "frozen", False):
-        link_text, link_url = "View release on GitHub", f"{UpdateChecker.REPO_URL}/releases/tag/{commit_hash}"
-    else:
-        link_text, link_url = "View README on GitHub", f"{UpdateChecker.REPO_URL}#readme"
-    link = tk.Label(
-        dlg, text=link_text,
-        font=(UI_FONT, 9, "underline"), bg=BG_DARK, fg=FG_LINK,
-        cursor="hand2",
-    )
-    link.pack(**pad, pady=(0, 10))
-    link.bind("<Button-1>", lambda _: webbrowser.open(link_url))
+        if getattr(sys, "frozen", False):
+            link_text = "View release on GitHub"
+            link_url = f"{UpdateChecker.REPO_URL}/releases/tag/{commit_hash}"
+        else:
+            link_text = "View README on GitHub"
+            link_url = f"{UpdateChecker.REPO_URL}#readme"
+        link = _ClickableLabel(link_text, url_fn=lambda: link_url)
+        link.setStyleSheet(f"color: {FG_LINK}; font-size: 12px; text-decoration: underline;")
+        layout.addWidget(link)
 
-    status_lbl = tk.Label(dlg, text="", font=(UI_FONT, 9), bg=BG_DARK, fg=FG_MUTED)
-    status_lbl.pack(**pad, pady=(0, 4))
+        self._status_lbl = QLabel("")
+        self._status_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 12px;")
+        layout.addWidget(self._status_lbl)
 
-    btn_frame = tk.Frame(dlg, bg=BG_DARK)
-    btn_frame.pack(**pad, pady=(0, 16))
+        layout.addStretch()
 
-    def do_update():
-        update_btn.config(state=tk.DISABLED)
-        skip_btn.config(state=tk.DISABLED)
-        status_lbl.config(text="Updating...", fg=FG_TEXT)
-        dlg.update()
+        btn_layout = QHBoxLayout()
+        self._update_btn = QPushButton("Update")
+        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._update_btn.clicked.connect(self._do_update)
+        btn_layout.addWidget(self._update_btn)
+
+        self._skip_btn = QPushButton("Skip")
+        self._skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._skip_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(self._skip_btn)
+        btn_layout.addStretch()
+        layout.addLayout(btn_layout)
+
+    def _do_update(self):
+        self._update_btn.setEnabled(False)
+        self._skip_btn.setEnabled(False)
+        self._status_lbl.setText("Updating...")
+        self._status_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
 
         def _run():
             ok, msg = UpdateChecker.apply_update()
-            dlg.after(0, lambda: _on_result(ok, msg))
-
-        def _on_result(ok, msg):
-            if ok:
-                status_lbl.config(text="Update complete — restarting...", fg=COLOUR[ST_SUCCESS])
-                dlg.update()
-                dlg.after(500, UpdateChecker.restart_app)
-            else:
-                status_lbl.config(text=f"Update failed: {msg}", fg=COLOUR[ST_FAILURE])
-                skip_btn.config(state=tk.NORMAL)
+            QTimer.singleShot(0, lambda: self._on_result(ok, msg))
 
         threading.Thread(target=_run, daemon=True).start()
 
-    update_btn = tk.Button(
-        btn_frame, text="Update", font=(UI_FONT, 10),
-        bg=ACCENT, fg=FG_TEXT, activebackground=BG_ROW, activeforeground=FG_TEXT,
-        relief=tk.FLAT, padx=16, pady=4, cursor="hand2", command=do_update,
-    )
-    update_btn.pack(side=tk.LEFT, padx=(0, 8))
-
-    skip_btn = tk.Button(
-        btn_frame, text="Skip", font=(UI_FONT, 10),
-        bg=ACCENT, fg=FG_MUTED, activebackground=BG_ROW, activeforeground=FG_TEXT,
-        relief=tk.FLAT, padx=16, pady=4, cursor="hand2", command=dlg.destroy,
-    )
-    skip_btn.pack(side=tk.LEFT)
-
-    # Center on screen
-    dlg.update_idletasks()
-    w, h = dlg.winfo_width(), dlg.winfo_height()
-    x = (dlg.winfo_screenwidth() - w) // 2
-    y = (dlg.winfo_screenheight() - h) // 2
-    dlg.geometry(f"+{x}+{y}")
-
-    dlg.grab_set()
-    root.wait_window(dlg)
+    def _on_result(self, ok, msg):
+        if ok:
+            self._status_lbl.setText("Update complete — restarting...")
+            self._status_lbl.setStyleSheet(f"color: {COLOUR[ST_SUCCESS]}; font-size: 12px;")
+            QTimer.singleShot(500, UpdateChecker.restart_app)
+        else:
+            self._status_lbl.setText(f"Update failed: {msg}")
+            self._status_lbl.setStyleSheet(f"color: {COLOUR[ST_FAILURE]}; font-size: 12px;")
+            self._skip_btn.setEnabled(True)
 
 
 # ---------------------------------------------------------------------------
 # Window state persistence
 # ---------------------------------------------------------------------------
+if IS_WINDOWS:
+    class _MONITORINFO(ctypes.Structure):
+        """Win32 MONITORINFO struct for multi-monitor work area detection."""
+        _fields_ = [
+            ("cbSize", ctypes.wintypes.DWORD),
+            ("rcMonitor", ctypes.wintypes.RECT),
+            ("rcWork", ctypes.wintypes.RECT),
+            ("dwFlags", ctypes.wintypes.DWORD),
+        ]
+
+
 def _get_monitor_work_areas() -> list[tuple[int, int, int, int]]:
-    """Return list of (left, top, right, bottom) work areas for all monitors."""
+    """Return list of (left, top, right, bottom) work areas for all monitors.
+    Uses Win32 API on Windows, Qt screens elsewhere."""
     areas: list[tuple[int, int, int, int]] = []
-    try:
-        monitor_enum_proc = ctypes.WINFUNCTYPE(
-            ctypes.c_int,
-            ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(ctypes.wintypes.RECT), ctypes.c_double,
-        )
+    if IS_WINDOWS:
+        try:
+            monitor_enum_proc = ctypes.WINFUNCTYPE(
+                ctypes.c_int,
+                ctypes.c_ulong, ctypes.c_ulong, ctypes.POINTER(ctypes.wintypes.RECT), ctypes.c_double,
+            )
 
-        def callback(hmonitor, hdc, lprect, lparam):
-            # MONITORINFO struct: cbSize (DWORD), rcMonitor (RECT), rcWork (RECT), dwFlags (DWORD)
-            class MONITORINFO(ctypes.Structure):
-                _fields_ = [
-                    ("cbSize", ctypes.wintypes.DWORD),
-                    ("rcMonitor", ctypes.wintypes.RECT),
-                    ("rcWork", ctypes.wintypes.RECT),
-                    ("dwFlags", ctypes.wintypes.DWORD),
-                ]
-            mi = MONITORINFO()
-            mi.cbSize = ctypes.sizeof(MONITORINFO)
-            if ctypes.windll.user32.GetMonitorInfoW(hmonitor, ctypes.byref(mi)):
-                rc = mi.rcWork
-                areas.append((rc.left, rc.top, rc.right, rc.bottom))
-            return 1  # continue enumeration
+            def callback(hmonitor, hdc, lprect, lparam):
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                if ctypes.windll.user32.GetMonitorInfoW(hmonitor, ctypes.byref(mi)):
+                    rc = mi.rcWork
+                    areas.append((rc.left, rc.top, rc.right, rc.bottom))
+                return 1  # continue enumeration
 
-        ctypes.windll.user32.EnumDisplayMonitors(
-            None, None, monitor_enum_proc(callback), 0,
-        )
-    except Exception:
-        pass
+            ctypes.windll.user32.EnumDisplayMonitors(
+                None, None, monitor_enum_proc(callback), 0,
+            )
+        except Exception:
+            pass
+    if not areas:
+        # Qt fallback — works on all platforms (Linux, macOS, Windows without ctypes)
+        try:
+            app = QApplication.instance()
+            if app:
+                for screen in app.screens():
+                    g = screen.availableGeometry()
+                    areas.append((g.x(), g.y(), g.x() + g.width(), g.y() + g.height()))
+        except Exception:
+            pass
     return areas
 
 
@@ -2635,284 +2653,266 @@ def _rect_overlaps(
 
 
 # ---------------------------------------------------------------------------
-# Tooltip helper
+# Global dark stylesheet
 # ---------------------------------------------------------------------------
-def _attach_tooltip(widget: tk.Widget, text: str, delay: int = 400):
-    """Show a small tooltip after hovering for *delay* ms."""
-    tip: tk.Toplevel | None = None
-    after_id: str | None = None
-
-    def _show(e):
-        nonlocal tip, after_id
-        def _create():
-            nonlocal tip
-            tip = tk.Toplevel(widget)
-            tip.wm_overrideredirect(True)
-            lbl = tk.Label(tip, text=text, bg="#292524", fg=FG_TEXT,
-                           font=(UI_FONT, 8), padx=6, pady=3,
-                           relief="solid", borderwidth=1, highlightthickness=0)
-            lbl.pack()
-            tip.update_idletasks()
-            # Position below the widget, clamped to screen
-            wx = widget.winfo_rootx()
-            wy = widget.winfo_rooty() + widget.winfo_height() + 4
-            tw = tip.winfo_reqwidth()
-            sw = widget.winfo_screenwidth()
-            if wx + tw > sw:
-                wx = sw - tw - 4
-            tip.wm_geometry(f"+{wx}+{wy}")
-        after_id = widget.after(delay, _create)
-
-    def _hide(_e=None):
-        nonlocal tip, after_id
-        if after_id:
-            widget.after_cancel(after_id)
-            after_id = None
-        if tip:
-            tip.destroy()
-            tip = None
-
-    widget.bind("<Enter>", _show)
-    widget.bind("<Leave>", _hide)
+DARK_STYLESHEET = f"""
+    * {{ font-family: '{UI_FONT}'; }}
+    QMainWindow, QWidget {{ background-color: {BG_DARK}; color: {FG_TEXT}; }}
+    QScrollArea {{ border: none; background-color: {BG_DARK}; }}
+    QScrollBar:vertical {{
+        background: {BG_DARK}; width: 10px; border: none; margin: 0;
+    }}
+    QScrollBar::handle:vertical {{
+        background: {BG_ROW}; min-height: 30px; border-radius: 5px;
+    }}
+    QScrollBar::handle:vertical:hover {{ background: {FG_MUTED}; }}
+    QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
+    QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
+    QCheckBox {{ color: {FG_MUTED}; font-size: 11px; spacing: 4px; }}
+    QCheckBox::indicator {{ width: 14px; height: 14px; }}
+    QToolTip {{
+        background-color: #292524; color: {FG_TEXT}; border: 1px solid #44403C;
+        font-size: 11px; padding: 4px 6px;
+    }}
+    QPushButton {{
+        background-color: {ACCENT}; color: {FG_TEXT}; border: none;
+        padding: 4px 16px; font-size: 13px;
+    }}
+    QPushButton:hover {{ background-color: {BG_ROW}; }}
+    QPushButton:disabled {{ color: {FG_MUTED}; }}
+    QMenu {{
+        background-color: {BG_ROW}; color: {FG_TEXT}; border: 1px solid #44403C;
+        font-size: 12px; padding: 4px 0;
+    }}
+    QMenu::item {{ padding: 4px 20px; }}
+    QMenu::item:selected {{ background-color: #4A3728; }}
+"""
 
 
 # ---------------------------------------------------------------------------
 # Main window
 # ---------------------------------------------------------------------------
-class MainWindow:
+class MainWindow(QMainWindow):
     def __init__(self, config_mgr: ConfigManager, event_queue: queue.Queue):
-        self._config_mgr  = config_mgr
+        super().__init__()
+        self._config_mgr = config_mgr
         self._event_queue = event_queue
         self._pollers: dict[int, WorkflowPoller] = {}
-        self._states:  dict[tuple[int, Optional[str]], WorkflowState]  = {}
-        self._rows:    dict[tuple[int, Optional[str]], WorkflowRow]     = {}
+        self._states: dict[tuple[int, Optional[str]], WorkflowState] = {}
+        self._rows: dict[tuple[int, Optional[str]], WorkflowRow] = {}
         self._snoozed: set[tuple[int, Optional[str]]] = set()
-        self._tray: Optional[TrayManager] = None
-        self._sections: list[tk.Frame] = []           # section header+container frames
-        self._wid_container: dict[int, tk.Frame] = {} # wid → section content frame
-        self._section_content: dict[str, tk.Frame] = {}    # title → content frame
-        self._section_indicators: dict[str, tk.Label] = {} # title → indicator label
-        self._collapsed: dict[str, bool] = {}              # title → collapsed flag
-        self._section_sort: dict[str, Optional[str]] = {}  # title → sort mode or None
-        self._sort_labels: dict[str, dict[str, tk.Label]] = {}  # title → {key: label}
+        self._tray: Optional[QSystemTrayIcon] = None
+        self._tray_icons: dict[str, QIcon] = {}
+        self._prev_tray_status: Optional[str] = None
+        self._sections: list[QWidget] = []
+        self._wid_container: dict[int, QWidget] = {}
+        self._section_content: dict[str, QWidget] = {}
+        self._section_content_layout: dict[str, QVBoxLayout] = {}
+        self._section_indicators: dict[str, QLabel] = {}
+        self._collapsed: dict[str, bool] = {}
+        self._section_sort: dict[str, Optional[str]] = {}
+        self._sort_labels: dict[str, dict[str, QLabel]] = {}
 
-        self._root = tk.Tk()
-        self._root.title(APP_NAME)
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumSize(400, 200)
+        self.resize(560, 420)
+
         _generate_app_ico()
-        if APP_ICO.exists() and IS_WINDOWS:
-            self._root.iconbitmap(str(APP_ICO))
-        # Also set via iconphoto for taskbar/alt-tab on Windows
         try:
-            self._app_icon_photos = [
-                ImageTk.PhotoImage(_make_base_icon(s)) for s in (256, 64, 48, 32, 16)
-            ]
-            self._root.wm_iconphoto(True, *self._app_icon_photos)
+            icon_pixmaps = [_pil_to_qpixmap(_make_base_icon(s)) for s in (256, 64, 48, 32, 16)]
+            app_icon = QIcon()
+            for pm in icon_pixmaps:
+                app_icon.addPixmap(pm)
+            self.setWindowIcon(app_icon)
         except Exception:
             pass
-        self._root.configure(bg=BG_DARK)
-        self._root.resizable(True, True)
-        self._root.geometry("560x420")
-        self._root.minsize(400, 200)
-        self._restore_all_state()
 
         _init_status_icons()
         _init_snooze_icons()
+
+        self._restore_all_state()
         self._build_ui()
+        self._setup_tray()
 
-        # Shared context menu — one instance for all WorkflowRows
-        self._shared_ctx_menu = tk.Menu(self._root, tearoff=0, bg=BG_ROW, fg=FG_TEXT,
-                                        activebackground="#4A3728", activeforeground=FG_TEXT,
-                                        font=(UI_FONT, 9))
-        self._shared_ctx_menu.add_command(label="Snooze", command=lambda: None)
+        # Shared context menu
+        self._ctx_menu = QMenu(self)
         self._ctx_menu_target: Optional[tuple[int, Optional[str]]] = None
-
-        self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
-        self._root.bind("<Unmap>", self._on_unmap)
+        self._ctx_snooze_action = self._ctx_menu.addAction("Snooze")
+        self._ctx_snooze_action.triggered.connect(
+            lambda: self._toggle_snooze(self._ctx_menu_target) if self._ctx_menu_target else None)
 
         self._start_pollers()
-        self._root.after(500, self._drain_queue)
-        self._root.after(5000, self._watch_config)
+
+        # Timers
+        self._drain_timer = QTimer(self)
+        self._drain_timer.timeout.connect(self._drain_queue)
+        self._drain_timer.start(500)
+
+        self._config_timer = QTimer(self)
+        self._config_timer.timeout.connect(self._watch_config)
+        self._config_timer.start(5000)
 
     # ------------------------------------------------------------------
     # UI construction
     # ------------------------------------------------------------------
     def _build_ui(self):
-        # Dark ttk scrollbar style
-        style = ttk.Style()
-        style.theme_use("clam")
-        style.configure("Dark.Vertical.TScrollbar",
-                        background=BG_ROW, troughcolor=BG_DARK,
-                        bordercolor=BG_DARK, arrowcolor=FG_MUTED,
-                        lightcolor=BG_DARK, darkcolor=BG_DARK)
-        style.map("Dark.Vertical.TScrollbar",
-                  background=[("active", FG_MUTED), ("!active", BG_ROW)])
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QVBoxLayout(central)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
 
-        # Title bar area
-        header = tk.Frame(self._root, bg=BG_DARK, height=46)
-        header.pack(fill=tk.X)
-        header.pack_propagate(False)
+        # Header
+        header = QWidget()
+        header.setFixedHeight(46)
+        header_layout = QHBoxLayout(header)
+        header_layout.setContentsMargins(14, 0, 14, 0)
 
         # Summit logo
         logo_data = base64.b64decode(_SUMMIT_LOGO_B64)
         logo_img = Image.open(io.BytesIO(logo_data))
-        # Scale to 28px height for the header
         scale = 28 / logo_img.height
-        logo_img = logo_img.resize(
-            (round(logo_img.width * scale), 28), Image.LANCZOS,
-        )
-        self._summit_logo = ImageTk.PhotoImage(logo_img)
-        logo_lbl = tk.Label(
-            header, image=self._summit_logo, bg=BG_DARK, cursor="hand2",
-        )
-        logo_lbl.pack(side=tk.LEFT, padx=(14, 0), pady=9)
-        logo_lbl.bind("<Button-1>", lambda _: webbrowser.open("https://summit.nl"))
-        _attach_tooltip(logo_lbl, "summit.nl")
+        logo_img = logo_img.resize((round(logo_img.width * scale), 28), Image.LANCZOS)
+        logo_lbl = _ClickableLabel(url_fn=lambda: "https://summit.nl")
+        logo_lbl.setPixmap(_pil_to_qpixmap(logo_img))
+        logo_lbl.setToolTip("summit.nl")
+        header_layout.addWidget(logo_lbl)
 
-        tk.Label(
-            header, text=APP_NAME, font=(UI_FONT, 12),
-            bg=BG_DARK, fg=FG_TEXT,
-        ).pack(side=tk.LEFT, padx=(10, 16), pady=10)
+        title_lbl = QLabel(APP_NAME)
+        title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 15px;")
+        title_lbl.setContentsMargins(10, 0, 16, 0)
+        header_layout.addWidget(title_lbl)
+        header_layout.addStretch()
 
-        self._refresh_icon = ImageTk.PhotoImage(_make_refresh_icon(24))
-        refresh_btn = tk.Label(
-            header, image=self._refresh_icon,
-            bg=BG_DARK, cursor="hand2", padx=8, pady=4,
-        )
-        refresh_btn.pack(side=tk.RIGHT, padx=(0, 14), pady=8)
-        refresh_btn.bind("<Button-1>", lambda _: self._refresh_all())
-        _attach_tooltip(refresh_btn, "Refresh all workflows")
+        refresh_pm = _pil_to_qpixmap(_make_refresh_icon(24))
+        refresh_btn = QLabel()
+        refresh_btn.setPixmap(refresh_pm)
+        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        refresh_btn.setToolTip("Refresh all workflows")
+        refresh_btn.mousePressEvent = lambda e: self._refresh_all()
+        header_layout.addWidget(refresh_btn)
 
-        # Thin warm separator line under header
-        tk.Frame(self._root, bg="#44403C", height=1).pack(fill=tk.X)
+        main_layout.addWidget(header)
+
+        # Separator
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background-color: #44403C;")
+        main_layout.addWidget(sep)
 
         # Column headers
-        hdr = tk.Frame(self._root, bg=BG_DARK)
-        hdr.pack(fill=tk.X, padx=14, pady=(6, 2))
-        tk.Label(hdr, text="STATUS / WORKFLOW", font=(UI_FONT, 7, "bold"),
-                 bg=BG_DARK, fg=FG_MUTED, anchor="w").pack(side=tk.LEFT, expand=True, fill=tk.X)
-        tk.Label(hdr, text="POLL", font=(UI_FONT, 7, "bold"),
-                 bg=BG_DARK, fg=FG_MUTED, width=12, anchor="e").pack(side=tk.RIGHT)
+        col_hdr = QWidget()
+        col_hdr_layout = QHBoxLayout(col_hdr)
+        col_hdr_layout.setContentsMargins(14, 6, 14, 2)
+        lbl_status = QLabel("STATUS / WORKFLOW")
+        lbl_status.setStyleSheet(f"color: {FG_MUTED}; font-size: 9px; font-weight: bold;")
+        col_hdr_layout.addWidget(lbl_status, 1)
+        lbl_poll = QLabel("POLL")
+        lbl_poll.setStyleSheet(f"color: {FG_MUTED}; font-size: 9px; font-weight: bold;")
+        lbl_poll.setAlignment(Qt.AlignmentFlag.AlignRight)
+        col_hdr_layout.addWidget(lbl_poll)
+        main_layout.addWidget(col_hdr)
 
-        # Scrollable workflow list
-        container = tk.Frame(self._root, bg=BG_DARK)
-        container.pack(fill=tk.BOTH, expand=True, padx=8)
-
-        canvas = tk.Canvas(container, bg=BG_DARK, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(container, orient="vertical", command=canvas.yview,
-                                  style="Dark.Vertical.TScrollbar")
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._list_frame = tk.Frame(canvas, bg=BG_DARK)
-        self._canvas_window = canvas.create_window((0, 0), window=self._list_frame, anchor="nw")
-
-        self._scroll_update_pending = False
-
-        def _update_scroll_region():
-            self._scroll_update_pending = False
-            self._list_frame.update_idletasks()
-            req_h = self._list_frame.winfo_reqheight()
-            vis_h = canvas.winfo_height()
-            canvas.itemconfig(self._canvas_window, width=canvas.winfo_width(),
-                              height=max(req_h, vis_h))
-            canvas.configure(scrollregion=(0, 0, self._list_frame.winfo_reqwidth(),
-                                           max(req_h, vis_h)))
-            if req_h > vis_h:
-                if not scrollbar.winfo_ismapped():
-                    canvas.pack_forget()
-                    scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-                    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-            else:
-                if scrollbar.winfo_ismapped():
-                    scrollbar.pack_forget()
-        self._update_scroll_region = _update_scroll_region
-
-        def _schedule_scroll_update(_e=None):
-            if not self._scroll_update_pending:
-                self._scroll_update_pending = True
-                canvas.after(50, _update_scroll_region)
-
-        canvas.bind("<Configure>", _schedule_scroll_update)
-        self._list_frame.bind("<Configure>", _schedule_scroll_update)
-
-        def _on_mousewheel(e):
-            canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
-        def _on_mousewheel_linux(e, direction):
-            canvas.yview_scroll(direction, "units")
-        canvas.bind_all("<MouseWheel>", _on_mousewheel)
-        if IS_LINUX:
-            canvas.bind_all("<Button-4>", lambda e: _on_mousewheel_linux(e, -3))
-            canvas.bind_all("<Button-5>", lambda e: _on_mousewheel_linux(e, 3))
-
-        self._canvas = canvas
+        # Scrollable list
+        self._scroll_area = QScrollArea()
+        self._scroll_area.setWidgetResizable(True)
+        self._scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._scroll_content = QWidget()
+        self._scroll_layout = QVBoxLayout(self._scroll_content)
+        self._scroll_layout.setContentsMargins(8, 0, 8, 8)
+        self._scroll_layout.setSpacing(0)
+        self._scroll_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self._scroll_area.setWidget(self._scroll_content)
+        main_layout.addWidget(self._scroll_area, 1)
 
         # Footer
-        footer = tk.Frame(self._root, bg=ACCENT)
-        footer.pack(fill=tk.X, side=tk.BOTTOM)
+        footer = QWidget()
+        footer.setStyleSheet(f"background-color: {ACCENT};")
+        footer_layout = QVBoxLayout(footer)
+        footer_layout.setContentsMargins(0, 0, 0, 0)
+        footer_layout.setSpacing(0)
 
-        # Thin separator above footer
-        tk.Frame(footer, bg="#44403C", height=1).pack(fill=tk.X)
+        footer_sep = QFrame()
+        footer_sep.setFixedHeight(1)
+        footer_sep.setStyleSheet("background-color: #44403C;")
+        footer_layout.addWidget(footer_sep)
 
-        # Row 1: config hint + open button
-        footer_row1 = tk.Frame(footer, bg=ACCENT)
-        footer_row1.pack(fill=tk.X, padx=14, pady=(8, 2))
+        # Footer row 1
+        row1 = QWidget()
+        row1_layout = QHBoxLayout(row1)
+        row1_layout.setContentsMargins(14, 8, 14, 2)
+        hint = QLabel("Edit config.yaml to add/change workflows.")
+        hint.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        row1_layout.addWidget(hint)
+        row1_layout.addStretch()
+        open_btn = _ClickableLabel("Open config ↗", url_fn=lambda: None)
+        open_btn.setStyleSheet(f"color: {FG_LINK}; font-size: 11px; font-weight: bold;")
+        open_btn.mousePressEvent = lambda e: ConfigManager.open_in_editor()
+        row1_layout.addWidget(open_btn)
+        footer_layout.addWidget(row1)
 
-        tk.Label(
-            footer_row1,
-            text="Edit config.yaml to add/change workflows.",
-            font=(UI_FONT, 8), bg=ACCENT, fg=FG_MUTED,
-        ).pack(side=tk.LEFT)
-
-        open_btn = tk.Label(
-            footer_row1, text="Open config ↗", font=(UI_FONT, 8, "bold"),
-            bg=ACCENT, fg=FG_LINK, cursor="hand2",
-        )
-        open_btn.pack(side=tk.RIGHT)
-        open_btn.bind("<Button-1>", lambda _: ConfigManager.open_in_editor())
-
-        # Row 2: startup checkbox (Windows only)
-        footer_row2 = tk.Frame(footer, bg=ACCENT)
-        footer_row2.pack(fill=tk.X, padx=14, pady=(0, 8))
+        # Footer row 2
+        row2 = QWidget()
+        row2_layout = QHBoxLayout(row2)
+        row2_layout.setContentsMargins(14, 0, 14, 8)
 
         if IS_WINDOWS:
-            self._startup_var = tk.BooleanVar(value=StartupManager.is_enabled())
-            startup_cb = tk.Checkbutton(
-                footer_row2,
-                text="Start with Windows",
-                variable=self._startup_var,
-                command=self._toggle_startup,
-                font=(UI_FONT, 8),
-                bg=ACCENT, fg=FG_MUTED,
-                activebackground=ACCENT, activeforeground=FG_TEXT,
-                selectcolor=BG_DARK,
-                relief=tk.FLAT, bd=0,
-            )
-            startup_cb.pack(side=tk.LEFT)
-        else:
-            tk.Label(
-                footer_row2, text="", bg=ACCENT, font=(UI_FONT, 8),
-            ).pack(side=tk.LEFT)
+            self._startup_cb = QCheckBox("Start with Windows")
+            self._startup_cb.setChecked(StartupManager.is_enabled())
+            self._startup_cb.toggled.connect(self._toggle_startup)
+            row2_layout.addWidget(self._startup_cb)
 
-        self._aot_var = tk.BooleanVar(value=self._root.attributes('-topmost'))
-        aot_cb = tk.Checkbutton(
-            footer_row2,
-            text="Always on top",
-            variable=self._aot_var,
-            command=self._toggle_always_on_top,
-            font=(UI_FONT, 8),
-            bg=ACCENT, fg=FG_MUTED,
-            activebackground=ACCENT, activeforeground=FG_TEXT,
-            selectcolor=BG_DARK,
-            relief=tk.FLAT, bd=0,
-        )
-        aot_cb.pack(side=tk.LEFT, padx=(12, 0))
+        self._aot_cb = QCheckBox("Always on top")
+        state = self._load_state()
+        self._aot_cb.setChecked(state.get("always_on_top", False))
+        self._aot_cb.toggled.connect(self._toggle_always_on_top)
+        row2_layout.addWidget(self._aot_cb)
+        row2_layout.addStretch()
+        footer_layout.addWidget(row2)
+
+        main_layout.addWidget(footer)
+
+    # ------------------------------------------------------------------
+    # System tray
+    # ------------------------------------------------------------------
+    def _setup_tray(self):
+        try:
+            self._tray_icons = {
+                s: QIcon(_pil_to_qpixmap(_make_icon_image(c))) for s, c in COLOUR.items()
+            }
+            self._tray = QSystemTrayIcon(self._tray_icons[ST_UNKNOWN], self)
+            tray_menu = QMenu()
+            tray_menu.addAction("Show", self._show_window)
+            tray_menu.addSeparator()
+            tray_menu.addAction("Quit", self._quit)
+            self._tray.setContextMenu(tray_menu)
+            self._tray.activated.connect(self._on_tray_activated)
+            self._tray.setToolTip(APP_NAME)
+            self._tray.show()
+        except Exception as exc:
+            print(f"[Tray] Failed to start tray icon: {exc}")
+            self._tray = None
+
+    def _on_tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            self._show_window()
+
+    def _update_tray(self):
+        if not self._tray:
+            return
+        unsnoozed = [s for k, s in self._states.items() if k not in self._snoozed]
+        combined = _combined_status(unsnoozed)
+        if combined == self._prev_tray_status:
+            return
+        self._prev_tray_status = combined
+        self._tray.setIcon(self._tray_icons.get(combined, self._tray_icons[ST_UNKNOWN]))
+        self._tray.setToolTip(f"{APP_NAME} — {combined.replace('_', ' ').title()}")
 
     # ------------------------------------------------------------------
     # Startup toggle
     # ------------------------------------------------------------------
-    def _toggle_startup(self):
-        if self._startup_var.get():
+    def _toggle_startup(self, checked: bool):
+        if checked:
             StartupManager.enable()
         else:
             StartupManager.disable()
@@ -2920,9 +2920,9 @@ class MainWindow:
     # ------------------------------------------------------------------
     # Always on top
     # ------------------------------------------------------------------
-    def _toggle_always_on_top(self):
-        on_top = self._aot_var.get()
-        self._root.attributes('-topmost', on_top)
+    def _toggle_always_on_top(self, on_top: bool):
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, on_top)
+        self.show()  # re-show after flag change
         try:
             state = self._load_state()
             state["always_on_top"] = on_top
@@ -2931,18 +2931,15 @@ class MainWindow:
             pass
 
     def _restore_all_state(self):
-        """Restore window geometry, collapse state, and always-on-top from a single state.json read."""
         try:
             state = self._load_state()
         except Exception:
             return
-        # Collapse state
         for title in state.get("collapsed_sections", []):
             self._collapsed[title] = True
-        # Always on top
         on_top = state.get("always_on_top", False)
-        self._root.attributes('-topmost', on_top)
-        # Window geometry
+        if on_top:
+            self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         win = state.get("window")
         if not win:
             return
@@ -2951,103 +2948,117 @@ class MainWindow:
             y = int(win["y"])
             w = max(int(win["width"]), 400)
             h = max(int(win["height"]), 200)
-            areas = _get_monitor_work_areas() if IS_WINDOWS else []
+            areas = _get_monitor_work_areas()
             if areas and not _rect_overlaps(x, y, w, h, areas):
-                self._root.geometry(f"{w}x{h}")
+                self.resize(w, h)
                 return
             if not areas:
-                sw = self._root.winfo_screenwidth()
-                sh = self._root.winfo_screenheight()
-                if x + w < 100 or x > sw - 100 or y + h < 50 or y > sh - 50:
-                    self._root.geometry(f"{w}x{h}")
-                    return
-            self._root.geometry(f"{w}x{h}+{x}+{y}")
+                screen = QApplication.primaryScreen()
+                if screen:
+                    sg = screen.geometry()
+                    if x + w < 100 or x > sg.width() - 100 or y + h < 50 or y > sg.height() - 50:
+                        self.resize(w, h)
+                        return
+            self.resize(w, h)
+            self.move(x, y)
         except Exception as exc:
             print(f"[State] Restore error: {exc}")
 
     # ------------------------------------------------------------------
     # Sections
     # ------------------------------------------------------------------
-    def _create_section(self, title: str) -> tk.Frame:
-        """Create a collapsible section header + content frame and return the content frame."""
-        section = tk.Frame(self._list_frame, bg=BG_DARK)
-        section.pack(fill=tk.X)
+    def _create_section(self, title: str) -> QWidget:
+        section = QWidget()
+        section.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        section_layout = QVBoxLayout(section)
+        section_layout.setContentsMargins(0, 0, 0, 0)
+        section_layout.setSpacing(0)
+        self._scroll_layout.addWidget(section)
         self._sections.append(section)
 
         is_collapsed = self._collapsed.get(title, False)
 
-        hdr = tk.Frame(section, bg=BG_DARK, cursor="hand2")
-        hdr.pack(fill=tk.X, padx=12, pady=(10, 4))
+        # Header
+        hdr = QWidget()
+        hdr.setCursor(Qt.CursorShape.PointingHandCursor)
+        hdr_layout = QHBoxLayout(hdr)
+        hdr_layout.setContentsMargins(12, 10, 0, 4)
 
-        indicator = tk.Label(hdr, text="▸" if is_collapsed else "▾",
-                             font=(UI_FONT, 9, "bold"),
-                             bg=BG_DARK, fg=FG_LINK, anchor="w")
-        indicator.pack(side=tk.LEFT, padx=(0, 4))
+        indicator = QLabel("▸" if is_collapsed else "▾")
+        indicator.setStyleSheet(f"color: {FG_LINK}; font-size: 12px; font-weight: bold;")
+        hdr_layout.addWidget(indicator)
         self._section_indicators[title] = indicator
 
-        title_lbl = tk.Label(hdr, text=title, font=(UI_FONT, 9, "bold"),
-                             bg=BG_DARK, fg=FG_LINK, anchor="w")
-        title_lbl.pack(side=tk.LEFT)
+        title_lbl = QLabel(title)
+        title_lbl.setStyleSheet(f"color: {FG_LINK}; font-size: 12px; font-weight: bold;")
+        hdr_layout.addWidget(title_lbl)
 
-        # Horizontal rule — warm tone
-        sep = tk.Frame(hdr, bg="#44403C", height=1)
-        sep.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0), pady=1)
+        sep = QFrame()
+        sep.setFixedHeight(1)
+        sep.setStyleSheet("background-color: #44403C;")
+        sep.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        hdr_layout.addWidget(sep, 1)
 
-        content = tk.Frame(section, bg=BG_DARK)
-        if not is_collapsed:
-            content.pack(fill=tk.X)
-        self._section_content[title] = content
+        hdr.mousePressEvent = lambda e, t=title: self._toggle_section(t)
+        section_layout.addWidget(hdr)
 
-        # Sort bar — inside content, above the rows
-        sort_bar = tk.Frame(content, bg=BG_ROW)
-        sort_bar.pack(fill=tk.X, padx=4, pady=(2, 0))
+        # Content container
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(0, 0, 0, 0)
+        content_layout.setSpacing(0)
+        content_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        tk.Label(sort_bar, text="SORT:", font=(UI_FONT, 8, "bold"),
-                 bg=BG_ROW, fg=FG_TEXT, padx=6, pady=3).pack(side=tk.LEFT)
+        # Sort bar
+        sort_bar = QWidget()
+        sort_bar.setStyleSheet(f"background-color: {BG_ROW};")
+        sort_layout = QHBoxLayout(sort_bar)
+        sort_layout.setContentsMargins(4, 0, 4, 0)
+        sort_layout.setSpacing(0)
 
-        labels: dict[str, tk.Label] = {}
+        sort_lbl = QLabel("SORT:")
+        sort_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 11px; font-weight: bold; padding: 3px 6px;")
+        sort_layout.addWidget(sort_lbl)
+
+        labels: dict[str, QLabel] = {}
         for sk in ("status", "updated", "created"):
-            lbl = tk.Label(sort_bar, text=f"{sk.capitalize()} ·", font=(UI_FONT, 8),
-                           bg=BG_ROW, fg=FG_MUTED, cursor="hand2", padx=6, pady=3)
-            lbl.pack(side=tk.LEFT)
-            lbl.bind("<Button-1>", lambda _e, t=title, k=sk: self._cycle_sort(t, k))
+            lbl = QLabel(f"{sk.capitalize()} ·")
+            lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px; padding: 3px 6px;")
+            lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+            lbl.mousePressEvent = lambda e, t=title, k=sk: self._cycle_sort(t, k)
+            sort_layout.addWidget(lbl)
             labels[sk] = lbl
         self._sort_labels[title] = labels
 
-        # Clear button
-        clear_lbl = tk.Label(sort_bar, text="✕", font=(UI_FONT, 8),
-                             bg=BG_ROW, fg=FG_MUTED, cursor="hand2", padx=8, pady=3)
-        clear_lbl.pack(side=tk.RIGHT)
-        clear_lbl.bind("<Button-1>", lambda _e, t=title: self._clear_sort(t))
+        sort_layout.addStretch()
 
-        # Bind click on all header widgets (collapse/expand)
-        def toggle(_e=None, t=title):
-            self._toggle_section(t)
-        for widget in (hdr, indicator, title_lbl, sep):
-            widget.bind("<Button-1>", toggle)
+        clear_lbl = QLabel("✕")
+        clear_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px; padding: 3px 8px;")
+        clear_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
+        clear_lbl.mousePressEvent = lambda e, t=title: self._clear_sort(t)
+        sort_layout.addWidget(clear_lbl)
+
+        content_layout.addWidget(sort_bar)
+
+        content.setVisible(not is_collapsed)
+        self._section_content[title] = content
+        self._section_content_layout[title] = content_layout
+        section_layout.addWidget(content)
 
         return content
 
     def _toggle_section(self, title: str):
-        """Toggle collapse/expand for a section."""
         is_collapsed = not self._collapsed.get(title, False)
         self._collapsed[title] = is_collapsed
-
         content = self._section_content.get(title)
         indicator = self._section_indicators.get(title)
-
         if content:
-            if is_collapsed:
-                content.pack_forget()
-            else:
-                content.pack(fill=tk.X)
+            content.setVisible(not is_collapsed)
         if indicator:
-            indicator.config(text="▸" if is_collapsed else "▾")
-
+            indicator.setText("▸" if is_collapsed else "▾")
         self._save_collapse_state()
 
     def _save_collapse_state(self):
-        """Persist collapsed sections to state.json."""
         try:
             state = self._load_state()
             self._persist_collapsed(state)
@@ -3059,11 +3070,8 @@ class MainWindow:
     # Section sorting
     # ------------------------------------------------------------------
     def _cycle_sort(self, title: str, sort_key: str):
-        """Cycle sort for a section+key: None → asc → desc → None. Only one sort active globally."""
         current = self._section_sort.get(title)
         prefix = f"{sort_key}_"
-
-        # Determine next state for this key
         if current == f"{prefix}asc":
             new_sort = f"{prefix}desc"
         elif current == f"{prefix}desc":
@@ -3073,29 +3081,23 @@ class MainWindow:
         else:
             new_sort = None
 
-        # Clear all other sorts globally (only one active at a time)
         prev_sorted_titles = [t for t, s in self._section_sort.items() if s is not None and t != title]
         for t in self._section_sort:
             self._section_sort[t] = None
         self._section_sort[title] = new_sort
-
         self._update_sort_labels()
-
-        # Re-sort affected sections
         self._sort_section(title)
         for t in prev_sorted_titles:
             self._sort_section(t)
-
         self._save_sort_state()
 
     def _sort_section(self, title: str):
-        """Re-order rows within a section based on the active sort."""
         content = self._section_content.get(title)
-        if not content:
+        content_layout = self._section_content_layout.get(title)
+        if not content or not content_layout:
             return
         sort_mode = self._section_sort.get(title)
 
-        # Collect rows belonging to this section
         section_rows: list[tuple[tuple[int, Optional[str]], WorkflowRow]] = []
         for key, row in self._rows.items():
             wid = key[0]
@@ -3105,7 +3107,6 @@ class MainWindow:
         if not section_rows:
             return
 
-        # Sort
         if sort_mode == "status_asc":
             section_rows.sort(key=lambda kr: _STATUS_PRIORITY.get(
                 self._states.get(kr[0], WorkflowState(name="", url="", branch=None)).status, 0), reverse=True)
@@ -3115,8 +3116,7 @@ class MainWindow:
         elif sort_mode in ("updated_asc", "updated_desc"):
             def _updated_key(kr):
                 s = self._states.get(kr[0])
-                ts = (s.run_updated_at or s.started_at or "") if s else ""
-                return ts
+                return (s.run_updated_at or s.started_at or "") if s else ""
             section_rows.sort(key=_updated_key, reverse=(sort_mode == "updated_asc"))
         elif sort_mode in ("created_asc", "created_desc"):
             def _created_key(kr):
@@ -3124,36 +3124,32 @@ class MainWindow:
                 return (s.started_at or "") if s else ""
             section_rows.sort(key=_created_key, reverse=(sort_mode == "created_asc"))
         else:
-            # Default: insertion order (sort by key tuple)
             section_rows.sort(key=lambda kr: (kr[0][0], kr[0][1] or ""))
 
-        # Re-pack in new order — suppress propagation to avoid per-row layout recalc
-        content.pack_propagate(False)
-        try:
-            for _key, row in section_rows:
-                row.frame.pack_forget()
-            for i, (_key, row) in enumerate(section_rows):
-                row.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
-                bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
-                row._bg = bg
-                self._set_row_bg(row, bg)
-        finally:
-            content.pack_propagate(True)
+        # Remove rows from layout (skip sort bar at index 0)
+        for _key, row in section_rows:
+            content_layout.removeWidget(row)
+        # Re-add in sorted order
+        for i, (_key, row) in enumerate(section_rows):
+            content_layout.addWidget(row)
+            bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
+            row._bg = bg
+            row._apply_background()
 
     def _update_sort_labels(self):
-        """Refresh all sort label text and colors to reflect current state."""
         _ARROWS = {"asc": "▲", "desc": "▼"}
         for title, labels in self._sort_labels.items():
             current = self._section_sort.get(title)
             for sk, lbl in labels.items():
                 if current and current.startswith(f"{sk}_"):
                     direction = current.split("_", 1)[1]
-                    lbl.config(text=f"{sk.capitalize()} {_ARROWS[direction]}", fg=FG_LINK)
+                    lbl.setText(f"{sk.capitalize()} {_ARROWS[direction]}")
+                    lbl.setStyleSheet(f"color: {FG_LINK}; font-size: 11px; padding: 3px 6px;")
                 else:
-                    lbl.config(text=f"{sk.capitalize()} ·", fg=FG_MUTED)
+                    lbl.setText(f"{sk.capitalize()} ·")
+                    lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px; padding: 3px 6px;")
 
     def _clear_sort(self, title: str):
-        """Clear sorting for a section and restore default order."""
         if not self._section_sort.get(title):
             return
         self._section_sort[title] = None
@@ -3162,7 +3158,6 @@ class MainWindow:
         self._save_sort_state()
 
     def _save_sort_state(self):
-        """Persist section sort preferences to state.json."""
         try:
             state = self._load_state()
             sorts = {t: s for t, s in self._section_sort.items() if s is not None}
@@ -3175,14 +3170,12 @@ class MainWindow:
             pass
 
     def _restore_sort_state(self):
-        """Restore section sort preferences from state.json."""
         state = self._load_state()
         for title, sort_mode in state.get("section_sort", {}).items():
             self._section_sort[title] = sort_mode
         self._update_sort_labels()
 
     def _resort_section_for_wid(self, wid: int):
-        """Re-sort the section containing the given workflow id, if it has an active sort."""
         container = self._wid_container.get(wid)
         if not container:
             return
@@ -3193,10 +3186,12 @@ class MainWindow:
 
     def _destroy_sections(self):
         for sec in self._sections:
-            sec.destroy()
+            sec.setParent(None)
+            sec.deleteLater()
         self._sections.clear()
         self._wid_container.clear()
         self._section_content.clear()
+        self._section_content_layout.clear()
         self._section_indicators.clear()
         self._sort_labels.clear()
 
@@ -3204,12 +3199,11 @@ class MainWindow:
     # Pollers
     # ------------------------------------------------------------------
     def _start_pollers(self):
-        cfg      = self._config_mgr.get()
+        cfg = self._config_mgr.get()
         notif_cfg = cfg.get("notifications", {})
         NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 3)))
         workflows = cfg.get("workflows") or []
 
-        # Build sections: branch-mode entries share one section; PR/actor each get their own
         branch_container = None
         for wid, entry in enumerate(workflows):
             mode = entry.get("mode", "branch")
@@ -3240,25 +3234,27 @@ class MainWindow:
             wf_file = url
             url_branch = None
 
-        container = self._wid_container.get(wid, self._list_frame)
+        container = self._wid_container.get(wid, self._scroll_content)
 
         if mode == "pr":
-            # PR mode: rows are created dynamically, no initial row
             poller = PRWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
         elif mode == "actor":
-            # Actor mode: rows are created dynamically, no initial row
             poller = ActorWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
         else:
-            branch   = entry.get("branch") or url_branch
-            name     = entry.get("name") or wf_file or url
-            state    = WorkflowState(name=name, url=url, branch=branch)
+            branch = entry.get("branch") or url_branch
+            name = entry.get("name") or wf_file or url
+            state = WorkflowState(name=name, url=url, branch=branch)
             key = (wid, None)
             self._states[key] = state
 
             alt = len(self._rows) % 2 == 1
             jira_url = cfg.get("jira_base_url", "")
-            row = WorkflowRow(container, wid, state, alt, jira_base_url=jira_url,
+            content_layout = self._section_content_layout.get(
+                next((t for t, c in self._section_content.items() if c is container), ""))
+            row = WorkflowRow(None, wid, state, alt, jira_base_url=jira_url,
                               sub_key=None, snooze_cb=self._show_row_ctx_menu)
+            if content_layout:
+                content_layout.addWidget(row)
             poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
             row.update(state, poll_rate, jira_base_url=jira_url)
             self._rows[key] = row
@@ -3274,47 +3270,39 @@ class MainWindow:
         self._pollers.clear()
 
     def _refresh_all(self):
-        """Trigger an immediate re-poll of all workflows."""
         for p in self._pollers.values():
             p.trigger_poll()
 
     # ------------------------------------------------------------------
-    # Queue drain (called periodically on main thread)
+    # Queue drain
     # ------------------------------------------------------------------
     def _drain_queue(self):
-        had_events = False
         try:
             while True:
                 event: StatusEvent = self._event_queue.get_nowait()
                 self._apply_event(event)
-                had_events = True
         except queue.Empty:
             pass
-        if had_events:
-            self._canvas.after_idle(self._update_scroll_region)
-        if IS_WINDOWS:
-            self._check_focus_signal()
-        self._root.after(500, self._drain_queue)
+        self._check_focus_signal()
 
     def _apply_event(self, event: StatusEvent):
         key = (event.workflow_id, event.sub_key)
-        cfg      = self._config_mgr.get()
+        cfg = self._config_mgr.get()
         workflows = cfg.get("workflows") or []
-        entry    = workflows[event.workflow_id] if event.workflow_id < len(workflows) else {}
+        entry = workflows[event.workflow_id] if event.workflow_id < len(workflows) else {}
         poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
-        jira_url  = cfg.get("jira_base_url", "")
+        jira_url = cfg.get("jira_base_url", "")
 
         if event.removed:
-            # Remove a stale PR row
             row = self._rows.pop(key, None)
             if row:
-                row.frame.destroy()
+                row.setParent(None)
+                row.deleteLater()
             self._states.pop(key, None)
             self._unsnooze(key)
             self._restripe_rows()
             self._resort_section_for_wid(event.workflow_id)
         else:
-            # Auto-clear snooze when a new run starts
             prev = self._states.get(key)
             if (key in self._snoozed and prev is not None
                     and event.new_state.run_id is not None
@@ -3329,34 +3317,34 @@ class MainWindow:
             if row:
                 row.update(event.new_state, poll_rate, jira_base_url=jira_url)
             elif event.sub_key is not None:
-                # Dynamically create a new PR row inside its section container
-                container = self._wid_container.get(event.workflow_id, self._list_frame)
+                container = self._wid_container.get(event.workflow_id, self._scroll_content)
+                content_layout = self._section_content_layout.get(
+                    next((t for t, c in self._section_content.items() if c is container), ""))
                 alt = len(self._rows) % 2 == 1
-                new_row = WorkflowRow(container, event.workflow_id, event.new_state, alt,
+                new_row = WorkflowRow(None, event.workflow_id, event.new_state, alt,
                                       jira_base_url=jira_url, sub_key=event.sub_key,
                                       snooze_cb=self._show_row_ctx_menu)
+                if content_layout:
+                    content_layout.addWidget(new_row)
                 new_row.update(event.new_state, poll_rate, jira_base_url=jira_url)
                 self._rows[key] = new_row
             self._resort_section_for_wid(event.workflow_id)
 
-        if self._tray:
-            unsnoozed = [s for k, s in self._states.items() if k not in self._snoozed]
-            self._tray.update(unsnoozed)
+        self._update_tray()
 
     def _show_row_ctx_menu(self, key: tuple[int, Optional[str]], event):
-        """Show shared context menu or directly toggle snooze (when event is None)."""
         if event is None:
-            # Direct snooze toggle (from snooze button click)
             self._toggle_snooze(key)
             return
         self._ctx_menu_target = key
         label = "Unsnooze" if key in self._snoozed else "Snooze"
-        self._shared_ctx_menu.entryconfigure(0, label=label,
-                                              command=lambda: self._toggle_snooze(self._ctx_menu_target))
-        self._shared_ctx_menu.tk_popup(event.x_root, event.y_root)
+        self._ctx_snooze_action.setText(label)
+        if isinstance(event, QPoint):
+            self._ctx_menu.popup(event)
+        else:
+            self._ctx_menu.popup(QCursor.pos())
 
     def _toggle_snooze(self, key: tuple[int, Optional[str]]):
-        """Toggle snooze state for a row."""
         if key in self._snoozed:
             self._unsnooze(key)
         else:
@@ -3366,29 +3354,23 @@ class MainWindow:
         row = self._rows.get(key)
         if row:
             row.set_snoozed(key in self._snoozed)
-        # Refresh tray icon with snoozed rows excluded
-        if self._tray:
-            unsnoozed = [s for k, s in self._states.items() if k not in self._snoozed]
-            self._tray.update(unsnoozed)
+        self._update_tray()
 
     def _unsnooze(self, key: tuple[int, Optional[str]]):
-        """Remove snooze state for a key."""
         self._snoozed.discard(key)
         with _snoozed_lock:
             _snoozed_keys.discard(key)
 
     def _restripe_rows(self):
-        """Recalculate alternating row backgrounds per-section after a row is removed."""
-        # Group rows by their section container
         section_rows: dict[int, list[WorkflowRow]] = {}
         for (wid, _sub), row in self._rows.items():
-            cid = id(self._wid_container.get(wid, self._list_frame))
+            cid = id(self._wid_container.get(wid, self._scroll_content))
             section_rows.setdefault(cid, []).append(row)
         for rows in section_rows.values():
             for i, row in enumerate(rows):
                 bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
                 row._bg = bg
-                self._set_row_bg(row, bg)
+                row._apply_background()
 
     # ------------------------------------------------------------------
     # Config hot-reload
@@ -3397,11 +3379,14 @@ class MainWindow:
         changed = self._config_mgr.load()
         if changed:
             self._reload_pollers()
-        self._root.after(5000, self._watch_config)
-
 
     def _reload_pollers(self):
         global _cached_github_username
+        # Preserve snooze state across config hot-reloads
+        saved_snoozed = set(self._snoozed)
+        saved_snoozed_keys = set()
+        with _snoozed_lock:
+            saved_snoozed_keys = set(_snoozed_keys)
         self._stop_all_pollers()
         self._rows.clear()
         self._states.clear()
@@ -3409,24 +3394,19 @@ class MainWindow:
         with _snoozed_lock:
             _snoozed_keys.clear()
         self._destroy_sections()
-        # Reset cached username so a token change takes effect
         with _github_username_lock:
             _cached_github_username = None
         self._start_pollers()
-        self._canvas.after_idle(self._update_scroll_region)
-
-    # ------------------------------------------------------------------
-    # Window / tray behaviour
-    # ------------------------------------------------------------------
-    def set_tray(self, tray: TrayManager):
-        self._tray = tray
+        # Restore snooze state
+        self._snoozed = saved_snoozed
+        with _snoozed_lock:
+            _snoozed_keys.update(saved_snoozed_keys)
 
     # ------------------------------------------------------------------
     # Window state persistence
     # ------------------------------------------------------------------
     @staticmethod
     def _load_state() -> dict:
-        """Load state.json, returning an empty dict on any error."""
         if STATE_FILE.exists():
             with open(STATE_FILE, encoding="utf-8") as fh:
                 return json.load(fh)
@@ -3434,12 +3414,10 @@ class MainWindow:
 
     @staticmethod
     def _write_state(state: dict):
-        """Write state dict to state.json."""
         with open(STATE_FILE, "w", encoding="utf-8") as fh:
             json.dump(state, fh, indent=2)
 
     def _persist_collapsed(self, state: dict):
-        """Update the collapsed_sections key in a state dict."""
         collapsed = [t for t, c in self._collapsed.items() if c]
         if collapsed:
             state["collapsed_sections"] = collapsed
@@ -3447,17 +3425,15 @@ class MainWindow:
             state.pop("collapsed_sections", None)
 
     def _save_window_state(self):
-        """Save current window geometry to state.json."""
         try:
             state = self._load_state()
+            pos = self.pos()
+            size = self.size()
             state["window"] = {
-                "x": self._root.winfo_x(),
-                "y": self._root.winfo_y(),
-                "width": self._root.winfo_width(),
-                "height": self._root.winfo_height(),
+                "x": pos.x(), "y": pos.y(),
+                "width": size.width(), "height": size.height(),
             }
             self._persist_collapsed(state)
-            # Persist sort state
             sorts = {t: s for t, s in self._section_sort.items() if s is not None}
             if sorts:
                 state["section_sort"] = sorts
@@ -3467,16 +3443,29 @@ class MainWindow:
         except Exception as exc:
             print(f"[State] Save error: {exc}")
 
+    # ------------------------------------------------------------------
+    # Window / tray behaviour
+    # ------------------------------------------------------------------
     def _hide_window(self):
         if self._tray:
-            self._root.withdraw()
+            self.hide()
         else:
-            self._root.iconify()
+            self.showMinimized()
 
     def _show_window(self):
-        self._root.deiconify()
-        self._root.lift()
-        self._root.focus_force()
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+
+    def closeEvent(self, event):
+        event.ignore()
+        self._hide_window()
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.Type.WindowStateChange:
+            if self.windowState() & Qt.WindowState.WindowMinimized and self._tray:
+                QTimer.singleShot(0, self.hide)
 
     def _check_focus_signal(self):
         if not _FOCUS_SIGNAL.exists():
@@ -3493,61 +3482,35 @@ class MainWindow:
                 self._blink_row(row)
 
     _BLINK_COLOR = "#4A3728"
-    _BLINK_STEPS = 6       # 3 on/off cycles
-    _BLINK_MS    = 150
+    _BLINK_STEPS = 6
+    _BLINK_MS = 150
 
-    def _blink_row(self, row, remaining: int = _BLINK_STEPS):
+    def _blink_row(self, row: WorkflowRow, remaining: int = _BLINK_STEPS):
         if remaining <= 0:
-            self._set_row_bg(row, row._bg)
+            row._bg = row._bg  # restore
+            row._apply_background()
             return
         color = self._BLINK_COLOR if remaining % 2 == 0 else row._bg
-        self._set_row_bg(row, color)
-        self._root.after(self._BLINK_MS, self._blink_row, row, remaining - 1)
-
-    @staticmethod
-    def _set_row_bg(row, color: str):
-        row.frame.config(bg=color)
-        for widget in row._bg_widgets:
-            try:
-                widget.config(bg=color)
-            except tk.TclError:
-                pass
-
-    def _on_unmap(self, event):
-        if event.widget is self._root and self._tray:
-            self._root.withdraw()
+        row.setStyleSheet(f"WorkflowRow {{ background-color: {color}; }}")
+        QTimer.singleShot(self._BLINK_MS, lambda: self._blink_row(row, remaining - 1))
 
     def _quit(self):
         self._save_window_state()
         self._stop_all_pollers()
         if self._tray:
-            self._tray.stop()
-        if IS_WINDOWS:
-            for f in (_FOCUS_SIGNAL, _FOCUS_VBS):
-                try:
-                    f.unlink(missing_ok=True)
-                except OSError:
-                    pass
-        self._root.destroy()
-
-    def run(self):
-        self._root.mainloop()
-
-    # Expose callbacks for tray
-    @property
-    def show_callback(self):
-        return lambda: self._root.after(0, self._show_window)
-
-    @property
-    def quit_callback(self):
-        return lambda: self._root.after(0, self._quit)
+            self._tray.hide()
+        for f in [_FOCUS_SIGNAL, _FOCUS_VBS, _FOCUS_SH]:
+            try:
+                f.unlink(missing_ok=True)
+            except OSError:
+                pass
+        QApplication.quit()
 
 
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 def main():
-    # Clean up leftover files from a previous binary update
     if getattr(sys, "frozen", False):
         for suffix in (".old", ".update"):
             try:
@@ -3557,52 +3520,34 @@ def main():
 
     if IS_WINDOWS:
         _ensure_focus_vbs()
+    elif IS_LINUX:
+        _ensure_focus_sh()
 
-    # Warn about missing Linux system libraries (non-blocking — user can dismiss)
+    app = QApplication(sys.argv)
+    app.setStyleSheet(DARK_STYLESHEET)
+
+    # Warn about missing Linux sound tools
     if IS_LINUX and _LINUX_MISSING:
-        _warn_root = tk.Tk()
-        _warn_root.withdraw()
-        import tkinter.messagebox as _mb
-        _mb.showwarning(
+        QMessageBox.warning(
+            None,
             "Actions Monitor — Missing System Libraries",
-            "The following system packages are missing or could not be loaded:\n\n"
+            "The following system packages are missing:\n\n"
             + "\n".join(f"  • {p}" for p in _LINUX_MISSING)
-            + "\n\nThe app will still start, but the tray icon and/or notification "
-            "sounds may not work.\n\n"
-            "Install with:\n"
-            "  sudo apt-get install " + " ".join(
-                p for p in _LINUX_MISSING if not p.startswith("pulseaudio")
-                and not p.startswith("alsa")
-            ).strip()
-            + ("\n  sudo apt-get install pulseaudio-utils  # or alsa-utils"
-               if any("paplay" in p or "aplay" in p for p in _LINUX_MISSING) else ""),
+            + "\n\nNotification sounds may not work.",
         )
-        _warn_root.destroy()
 
-    config_mgr  = ConfigManager()
+    config_mgr = ConfigManager()
 
-    # Check for updates before starting the main UI
+    # Check for updates
     new_version = UpdateChecker.check()
     if new_version:
-        root = tk.Tk()
-        root.withdraw()
-        _show_update_dialog(root, new_version)
-        root.destroy()
+        dlg = UpdateDialog(new_version)
+        dlg.exec()
 
     event_queue: queue.Queue = queue.Queue()
-
-    win  = MainWindow(config_mgr, event_queue)
-    try:
-        tray = TrayManager(win.show_callback, win.quit_callback)
-        win.set_tray(tray)
-        tray.start()
-        # Update tray icon immediately with initial (unknown) states
-        tray.update(list(win._states.values()))
-    except Exception as exc:
-        print(f"[Tray] Failed to start tray icon: {exc}")
-        print("[Tray] App will run without a system tray icon.")
-
-    win.run()
+    win = MainWindow(config_mgr, event_queue)
+    win.show()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":

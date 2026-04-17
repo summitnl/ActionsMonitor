@@ -16,6 +16,7 @@ venv/
 
 # Notification focus signal files
 _focus.vbs
+_focus.sh
 _focus_signal
 
 # PyInstaller build artifacts

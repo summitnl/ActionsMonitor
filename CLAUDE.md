@@ -33,20 +33,20 @@ Everything lives in `src/main.py` — single-file application by design.
 | `config.yaml` | User config (token, workflows) — hot-reloaded every 5s via mtime | Yes |
 | `config.template.yaml` | Checked-in template with documentation | No |
 | `state.json` | Window position/size persistence | Yes |
-| `_focus.vbs` | VBScript that creates signal file on notification body click | Yes |
-| `_focus_signal` | Transient signal file — triggers window raise + row blink | Yes |
+| `_focus.vbs` | VBScript that creates signal file on notification body click (Windows) | Yes |
+| `_focus.sh` | Shell script that creates signal file on notification body click (Linux; currently unused — plyer lacks launch support) | Yes |
+| `_focus_signal` | Transient signal file — triggers window raise + row blink (cross-platform) | Yes |
 | `app.ico` | Generated multi-size icon (16/32/48/256) | No |
 
 ### Threading model
 
 | Thread | What it does |
 |---|---|
-| Main (tkinter) | UI event loop; only thread that may touch widgets |
-| `poller-{n}` (one per workflow) | Polls GitHub API on a configurable interval; puts `StatusEvent` objects onto a shared `queue.Queue` |
-| `tray` | Runs the `pystray` icon loop |
+| Main (Qt/PySide6) | UI event loop; only thread that may touch widgets |
+| `poller-{n}` (one per workflow) | Polls GitHub API on a configurable interval via a per-poller `requests.Session` (HTTP keep-alive); puts `StatusEvent` objects onto a shared `queue.Queue` |
 | Ad-hoc daemon threads | Fire toast notifications + sounds without blocking pollers |
 
-The UI drains the queue via `root.after(500, _drain_queue)` — this is the only safe way to propagate poller results to tkinter widgets. Never call widget methods from poller threads directly.
+The UI drains the queue via `QTimer(500ms)` connected to `_drain_queue()` — this is the only safe way to propagate poller results to Qt widgets. Never call widget methods from poller threads directly.
 
 Pollers sleep between polls using a deadline loop that checks both `_stop_evt` and `_poll_now` events. The header **Refresh** icon button calls `_refresh_all()` which sets `_poll_now` on all pollers, waking them to re-poll immediately.
 
@@ -63,7 +63,7 @@ WorkflowPoller._poll()        # branch mode (default)
 PRWorkflowPoller._poll()      # pr mode
   → fetch_github_username()     # cached GET /user
   → fetch_pr_runs() × N         # primary + extra_workflows
-  → _fetch_user_open_prs()      # GET /pulls?state=open — discovers PRs with old/no runs
+  → _fetch_user_open_prs()      # GET /pulls?state=open&creator=... — discovers PRs with old/no runs
   → _fetch_branch_runs() × M    # per-branch fetch for newly discovered PR branches
   → filter out closed PRs       # drop runs for branches without an open PR
   → group by head_branch        # latest run per workflow file per branch
@@ -72,7 +72,7 @@ PRWorkflowPoller._poll()      # pr mode
   → aggregate status (worst wins)  # failure > running > queued > success (per PR)
   → pick representative run     # highest-priority status run for display
   → _fetch_pr_draft()           # GET /pulls/{n} → caches draft + title + base_ref + updated_at (every poll)
-  → _fetch_pr_review_status()   # GET /pulls/{n}/reviews → approved/changes_requested/pending
+  → _fetch_pr_review_status()   # GET /pulls/{n}/reviews → approved/changes_requested/pending (cached 120s)
   → compute staleness_level     # compare updated_at age against staleness_thresholds
   → extract_jira_key()          # regex on branch name
   → StatusEvent(sub_key=branch#pr) → queue.Queue   # one event per (branch, PR) pair
@@ -95,11 +95,11 @@ ActorWorkflowPoller._poll()   # actor mode
 ### Key classes
 
 - **`ConfigManager`** — loads `config.yaml` with `_deep_merge` against `DEFAULT_CONFIG`; thread-safe via a lock. `get()` always returns a snapshot.
-- **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`). Base class for `PRWorkflowPoller` and `ActorWorkflowPoller`.
+- **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`). Base class for `PRWorkflowPoller` and `ActorWorkflowPoller`. Owns a `requests.Session` for connection reuse and provides shared `_detect_notification()` and `_remove_sub_key()` helpers.
 - **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch` then by PR number, tracks per-(branch, PR) state, emits removal events for stale entries. Supports multiple PRs per branch (e.g. hotfix targeting both acceptance and production). Discovers all open user PRs via the Pulls API to ensure branches with old CI runs still appear. Fetches and caches PR draft status (refreshed every poll), title, and target branch.
 - **`ActorWorkflowPoller`** — subclass of `WorkflowPoller` (actor mode); fetches runs via repo-level `/actions/runs?actor=...`, groups by `workflow_name:head_branch`, supports client-side `filter: "failed"`. Uses `parse_actor_url()` for the different URL format.
-- **`WorkflowRow`** — auto-height tkinter widget with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
-- **`TrayManager`** — wraps `pystray`; coloured PIL icons are pre-generated at startup in `_icons` dict keyed by status constant.
+- **`WorkflowRow`** — `QWidget` subclass with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
+- **`QSystemTrayIcon`** — built into `MainWindow`; coloured PIL icons are converted to `QIcon` via `_pil_to_qpixmap()` and pre-generated at startup.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
 - **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers. On Windows, winotify toasts include the app icon (`APP_ICO`). Tracks recently notified `(wid, sub_key)` tuples via `_recently_notified` for blink-on-focus. Toast body `launch` points to `_focus.vbs` which creates `_focus_signal`; the main loop polls for this file and calls `_show_window()` + `_blink_row()` on matching rows.
 - **`UpdateChecker`** — on startup, compares local HEAD to `origin/main` via git. Skipped entirely when running as a frozen `.exe`.
@@ -137,7 +137,7 @@ Lucide-inspired icons rendered with PIL at 4x supersampling + LANCZOS downscale.
 | Skipped | Skip-forward | `_draw_lucide_skip_forward` |
 | Unknown | Question mark | `_draw_lucide_circle_help` |
 
-`_init_status_icons()` generates `ImageTk.PhotoImage` objects after the Tk root exists, cached in `_status_tk_icons`. Adding a new status requires updating: `COLOUR`, `COLOUR_BG`, `_STATUS_ICON_FUNC`, `STATUS_LABEL`, and `CONCLUSION_MAP`.
+`_init_status_icons()` generates `QPixmap` objects after `QApplication` exists, cached in `_status_qpixmaps`. Adding a new status requires updating: `COLOUR`, `COLOUR_BG`, `_STATUS_ICON_FUNC`, `STATUS_LABEL`, and `CONCLUSION_MAP`.
 
 ### App and tray icons
 
@@ -149,7 +149,7 @@ Lucide-inspired icons rendered with PIL at 4x supersampling + LANCZOS downscale.
 
 ### Tooltips
 
-`_attach_tooltip(widget, text, delay)` adds a hover tooltip to any tkinter widget. The tooltip appears below the widget after a configurable delay (default 400ms), clamped to screen bounds so it never clips off-screen.
+Tooltips use Qt's built-in `widget.setToolTip(text)`. Styled via QSS in `DARK_STYLESHEET`.
 
 ### Tray icon colour precedence
 
@@ -159,7 +159,7 @@ Lucide-inspired icons rendered with PIL at 4x supersampling + LANCZOS downscale.
 
 ### Window state
 
-`_save_window_state()` writes position/size to `state.json` on quit. `_restore_window_state()` reads it on startup and clamps to visible monitors using `EnumDisplayMonitors` + `GetMonitorInfoW` via ctypes. Falls back to tkinter `winfo_screenwidth/height` if ctypes fails. State file I/O is consolidated via `_load_state()`, `_write_state()`, and `_persist_collapsed()` helpers.
+`_save_window_state()` writes position/size to `state.json` on quit. `_restore_all_state()` reads it on startup and clamps to visible monitors using `EnumDisplayMonitors` + `GetMonitorInfoW` via ctypes. Falls back to `QApplication.primaryScreen().geometry()` if ctypes fails. State file I/O is consolidated via `_load_state()`, `_write_state()`, and `_persist_collapsed()` helpers.
 
 ### Auto-update check
 
