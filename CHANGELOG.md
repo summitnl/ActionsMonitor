@@ -1,5 +1,10 @@
 # Changelog
 
+### 2026-04-17
+
+- **Window resize performance** — fix sluggish window resizing (especially in .exe builds). Debounce canvas scroll-region recalculation (50ms throttle instead of every Configure event), cache per-row widget lists to avoid repeated `winfo_children()` traversals, share a single right-click context menu across all rows instead of creating one per row, and batch layout updates during section re-sorting.
+- **Code cleanup** — extract `_emit_error()` helper on `WorkflowPoller` (replaces 13 duplicate error-state blocks), extract `_worst_status()` to deduplicate status aggregation logic, guard `pack_propagate` toggle with try/finally.
+
 ### 2026-04-16
 
 - **Auto-hide scrollbar** — the workflow list scrollbar now only appears when there are enough items to scroll. Correctly shows/hides when the list grows or shrinks, including after config hot-reloads.

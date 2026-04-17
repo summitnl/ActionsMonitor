@@ -904,6 +904,17 @@ class WorkflowPoller(threading.Thread):
         """Wake the poller to re-poll immediately."""
         self._poll_now.set()
 
+    def _emit_error(self, error: str = "", branch=None, sub_key=None):
+        """Emit a ST_UNKNOWN state with an optional error message."""
+        state = WorkflowState(
+            name=self.name_display,
+            url=self.cfg_entry.get("url", ""),
+            branch=branch,
+        )
+        state.status = ST_UNKNOWN
+        state.error = error or None
+        self.event_queue.put(StatusEvent(self.wid, state, sub_key=sub_key))
+
     def run(self):
         while not self._stop_evt.is_set():
             self._poll()
@@ -929,30 +940,23 @@ class WorkflowPoller(threading.Thread):
         )
 
         if not self.owner:
-            state.status = ST_UNKNOWN
-            state.error  = "Invalid workflow URL in config"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error("Invalid workflow URL in config", branch=self.branch)
             return
 
         try:
             run = fetch_latest_run(self.owner, self.repo, self.wf_file, self.branch, token)
         except requests.HTTPError as exc:
-            state.status = ST_UNKNOWN
-            state.error  = f"HTTP {exc.response.status_code}"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(f"HTTP {exc.response.status_code}", branch=self.branch)
             return
         except Exception as exc:
-            state.status = ST_UNKNOWN
-            state.error  = str(exc)
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(str(exc), branch=self.branch)
             return
 
         state.last_check = datetime.now()
         state.error = None
 
         if run is None:
-            state.status = ST_UNKNOWN
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(branch=self.branch)
             return
 
         run_id    = run.get("id")
@@ -1086,23 +1090,14 @@ class PRWorkflowPoller(WorkflowPoller):
         try:
             username = fetch_github_username(token)
         except Exception as exc:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-            state.status = ST_UNKNOWN
-            state.error = f"Cannot resolve GitHub user: {exc}"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(f"Cannot resolve GitHub user: {exc}")
             return
         if not username:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-            state.status = ST_UNKNOWN
-            state.error = "No token configured (PR mode requires a token)"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error("No token configured (PR mode requires a token)")
             return
 
         if not self.owner:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-            state.status = ST_UNKNOWN
-            state.error = "Invalid workflow URL in config"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error("Invalid workflow URL in config")
             return
 
         # Fetch runs from primary workflow + any extra workflows
@@ -1117,19 +1112,12 @@ class PRWorkflowPoller(WorkflowPoller):
                 all_runs.extend(runs)
             except requests.HTTPError as exc:
                 if not all_runs and wf_file == self.wf_file:
-                    # Primary workflow failed — report error
-                    state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-                    state.status = ST_UNKNOWN
-                    state.error = f"HTTP {exc.response.status_code}"
-                    self.event_queue.put(StatusEvent(self.wid, state))
+                    self._emit_error(f"HTTP {exc.response.status_code}")
                     return
                 # Extra workflow failed — skip silently
             except Exception as exc:
                 if not all_runs and wf_file == self.wf_file:
-                    state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""), branch=None)
-                    state.status = ST_UNKNOWN
-                    state.error = str(exc)
-                    self.event_queue.put(StatusEvent(self.wid, state))
+                    self._emit_error(str(exc))
                     return
 
         # Fetch the user's open PRs — used to discover branches with old runs
@@ -1246,12 +1234,7 @@ class PRWorkflowPoller(WorkflowPoller):
                     representative_run = group_runs[0]
 
                 # Aggregate status (worst wins)
-                status_set = set(run_statuses)
-                if ST_FAILURE  in status_set: agg_status = ST_FAILURE
-                elif ST_RUNNING  in status_set: agg_status = ST_RUNNING
-                elif ST_QUEUED   in status_set: agg_status = ST_QUEUED
-                elif ST_SUCCESS  in status_set: agg_status = ST_SUCCESS
-                else:                           agg_status = ST_UNKNOWN
+                agg_status = _worst_status(set(run_statuses))
 
                 run = representative_run
                 state = WorkflowState(
@@ -1465,23 +1448,14 @@ class ActorWorkflowPoller(WorkflowPoller):
         try:
             username = fetch_github_username(token)
         except Exception as exc:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
-            state.status = ST_UNKNOWN
-            state.error = f"Cannot resolve GitHub user: {exc}"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(f"Cannot resolve GitHub user: {exc}")
             return
         if not username:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
-            state.status = ST_UNKNOWN
-            state.error = "No token configured (actor mode requires a token)"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error("No token configured (actor mode requires a token)")
             return
 
         if not self.owner:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
-            state.status = ST_UNKNOWN
-            state.error = "Invalid actor URL in config"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error("Invalid actor URL in config")
             return
 
         conclusion_filter = "failure" if self._filter == "failed" else None
@@ -1492,16 +1466,10 @@ class ActorWorkflowPoller(WorkflowPoller):
                 conclusion=conclusion_filter,
             )
         except requests.HTTPError as exc:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
-            state.status = ST_UNKNOWN
-            state.error = f"HTTP {exc.response.status_code}"
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(f"HTTP {exc.response.status_code}")
             return
         except Exception as exc:
-            state = WorkflowState(name=self.name_display, url=self.cfg_entry.get("url", ""))
-            state.status = ST_UNKNOWN
-            state.error = str(exc)
-            self.event_queue.put(StatusEvent(self.wid, state))
+            self._emit_error(str(exc))
             return
 
         # Client-side filter: when filter is "failed", also keep in-progress runs
@@ -1895,13 +1863,17 @@ def _generate_app_ico() -> None:
         print(f"[Icon] Generate error: {exc}")
 
 
-def _combined_status(states: list[WorkflowState]) -> str:
-    statuses = {s.status for s in states}
+def _worst_status(statuses: set[str]) -> str:
+    """Return the highest-priority status from a set (failure > running > queued > success)."""
     if ST_FAILURE  in statuses: return ST_FAILURE
     if ST_RUNNING  in statuses: return ST_RUNNING
     if ST_QUEUED   in statuses: return ST_QUEUED
     if ST_SUCCESS  in statuses: return ST_SUCCESS
     return ST_UNKNOWN
+
+
+def _combined_status(states: list[WorkflowState]) -> str:
+    return _worst_status({s.status for s in states})
 
 
 # ---------------------------------------------------------------------------
@@ -2099,27 +2071,28 @@ class WorkflowRow:
         self._bg = bg
         self._update_labels()
 
-        # Right-click context menu
-        self._ctx_menu = tk.Menu(self.frame, tearoff=0, bg=BG_ROW, fg=FG_TEXT,
-                                 activebackground="#4A3728", activeforeground=FG_TEXT,
-                                 font=(UI_FONT, 9))
-        self._ctx_menu.add_command(label="Snooze", command=self._toggle_snooze)
-        self.frame.bind("<Button-3>", self._show_ctx_menu)
-        # Bind on all child widgets too so right-click works anywhere on the row
+        # Cache all bg-configurable widgets (avoids winfo_children on every bg change)
+        self._bg_widgets: list[tk.Widget] = []
         for widget in self.frame.winfo_children():
-            widget.bind("<Button-3>", self._show_ctx_menu)
+            if widget is self._accent:
+                continue
+            self._bg_widgets.append(widget)
             if isinstance(widget, tk.Frame):
                 for child in widget.winfo_children():
-                    child.bind("<Button-3>", self._show_ctx_menu)
+                    self._bg_widgets.append(child)
 
-    def _show_ctx_menu(self, event):
-        label = "Unsnooze" if self._snoozed else "Snooze"
-        self._ctx_menu.entryconfigure(0, label=label)
-        self._ctx_menu.tk_popup(event.x_root, event.y_root)
+        # Right-click — bind all widgets to propagate to shared context menu
+        self.frame.bind("<Button-3>", self._on_right_click)
+        for widget in self._bg_widgets:
+            widget.bind("<Button-3>", self._on_right_click)
+
+    def _on_right_click(self, event):
+        if self._snooze_cb:
+            self._snooze_cb((self.wid, self._sub_key), event)
 
     def _toggle_snooze(self):
         if self._snooze_cb:
-            self._snooze_cb((self.wid, self._sub_key))
+            self._snooze_cb((self.wid, self._sub_key), None)
 
     def _snooze_hover_enter(self, _event=None):
         key = "active_hover" if self._snoozed else "hover"
@@ -2745,6 +2718,14 @@ class MainWindow:
         _init_status_icons()
         _init_snooze_icons()
         self._build_ui()
+
+        # Shared context menu — one instance for all WorkflowRows
+        self._shared_ctx_menu = tk.Menu(self._root, tearoff=0, bg=BG_ROW, fg=FG_TEXT,
+                                        activebackground="#4A3728", activeforeground=FG_TEXT,
+                                        font=(UI_FONT, 9))
+        self._shared_ctx_menu.add_command(label="Snooze", command=lambda: None)
+        self._ctx_menu_target: Optional[tuple[int, Optional[str]]] = None
+
         self._root.protocol("WM_DELETE_WINDOW", self._hide_window)
         self._root.bind("<Unmap>", self._on_unmap)
 
@@ -2826,7 +2807,10 @@ class MainWindow:
         self._list_frame = tk.Frame(canvas, bg=BG_DARK)
         self._canvas_window = canvas.create_window((0, 0), window=self._list_frame, anchor="nw")
 
+        self._scroll_update_pending = False
+
         def _update_scroll_region():
+            self._scroll_update_pending = False
             self._list_frame.update_idletasks()
             req_h = self._list_frame.winfo_reqheight()
             vis_h = canvas.winfo_height()
@@ -2844,13 +2828,13 @@ class MainWindow:
                     scrollbar.pack_forget()
         self._update_scroll_region = _update_scroll_region
 
-        def _on_canvas_configure(e):
-            canvas.after_idle(_update_scroll_region)
-        canvas.bind("<Configure>", _on_canvas_configure)
+        def _schedule_scroll_update(_e=None):
+            if not self._scroll_update_pending:
+                self._scroll_update_pending = True
+                canvas.after(50, _update_scroll_region)
 
-        def _on_frame_configure(_e):
-            canvas.after_idle(_update_scroll_region)
-        self._list_frame.bind("<Configure>", _on_frame_configure)
+        canvas.bind("<Configure>", _schedule_scroll_update)
+        self._list_frame.bind("<Configure>", _schedule_scroll_update)
 
         def _on_mousewheel(e):
             canvas.yview_scroll(int(-1 * (e.delta / 120)), "units")
@@ -3143,14 +3127,18 @@ class MainWindow:
             # Default: insertion order (sort by key tuple)
             section_rows.sort(key=lambda kr: (kr[0][0], kr[0][1] or ""))
 
-        # Re-pack in new order
-        for _key, row in section_rows:
-            row.frame.pack_forget()
-        for i, (_key, row) in enumerate(section_rows):
-            row.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
-            bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
-            row._bg = bg
-            self._set_row_bg(row, bg)
+        # Re-pack in new order — suppress propagation to avoid per-row layout recalc
+        content.pack_propagate(False)
+        try:
+            for _key, row in section_rows:
+                row.frame.pack_forget()
+            for i, (_key, row) in enumerate(section_rows):
+                row.frame.pack(fill=tk.X, padx=4, pady=(2, 0))
+                bg = BG_ROW_ALT if i % 2 == 1 else BG_ROW
+                row._bg = bg
+                self._set_row_bg(row, bg)
+        finally:
+            content.pack_propagate(True)
 
     def _update_sort_labels(self):
         """Refresh all sort label text and colors to reflect current state."""
@@ -3270,7 +3258,7 @@ class MainWindow:
             alt = len(self._rows) % 2 == 1
             jira_url = cfg.get("jira_base_url", "")
             row = WorkflowRow(container, wid, state, alt, jira_base_url=jira_url,
-                              sub_key=None, snooze_cb=self._toggle_snooze)
+                              sub_key=None, snooze_cb=self._show_row_ctx_menu)
             poll_rate = int(entry.get("polling_rate", POLL_DEFAULT))
             row.update(state, poll_rate, jira_base_url=jira_url)
             self._rows[key] = row
@@ -3346,7 +3334,7 @@ class MainWindow:
                 alt = len(self._rows) % 2 == 1
                 new_row = WorkflowRow(container, event.workflow_id, event.new_state, alt,
                                       jira_base_url=jira_url, sub_key=event.sub_key,
-                                      snooze_cb=self._toggle_snooze)
+                                      snooze_cb=self._show_row_ctx_menu)
                 new_row.update(event.new_state, poll_rate, jira_base_url=jira_url)
                 self._rows[key] = new_row
             self._resort_section_for_wid(event.workflow_id)
@@ -3354,6 +3342,18 @@ class MainWindow:
         if self._tray:
             unsnoozed = [s for k, s in self._states.items() if k not in self._snoozed]
             self._tray.update(unsnoozed)
+
+    def _show_row_ctx_menu(self, key: tuple[int, Optional[str]], event):
+        """Show shared context menu or directly toggle snooze (when event is None)."""
+        if event is None:
+            # Direct snooze toggle (from snooze button click)
+            self._toggle_snooze(key)
+            return
+        self._ctx_menu_target = key
+        label = "Unsnooze" if key in self._snoozed else "Snooze"
+        self._shared_ctx_menu.entryconfigure(0, label=label,
+                                              command=lambda: self._toggle_snooze(self._ctx_menu_target))
+        self._shared_ctx_menu.tk_popup(event.x_root, event.y_root)
 
     def _toggle_snooze(self, key: tuple[int, Optional[str]]):
         """Toggle snooze state for a row."""
@@ -3507,19 +3507,11 @@ class MainWindow:
     @staticmethod
     def _set_row_bg(row, color: str):
         row.frame.config(bg=color)
-        for widget in row.frame.winfo_children():
-            if widget is row._accent:
-                continue
+        for widget in row._bg_widgets:
             try:
                 widget.config(bg=color)
             except tk.TclError:
                 pass
-            if isinstance(widget, tk.Frame):
-                for child in widget.winfo_children():
-                    try:
-                        child.config(bg=color)
-                    except tk.TclError:
-                        pass
 
     def _on_unmap(self, event):
         if event.widget is self._root and self._tray:
