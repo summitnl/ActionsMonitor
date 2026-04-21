@@ -160,10 +160,9 @@ The tray icon follows the same logic, showing the worst state across all configu
 
 ### Updating
 
-The app checks for updates automatically on startup:
+Binary builds (the `.exe` / Linux binary) check GitHub Releases shortly after startup. If a newer release is found, a dialog offers to download and install the update in-place, then restart.
 
-- **Binary builds** check GitHub Releases for a newer version. If found, a dialog offers to download and install the update in-place.
-- **Running from source** uses `git fetch` to detect new commits. If behind, a dialog offers to pull and restart.
+Running from source does not auto-update — use `git pull` manually.
 
 ## Development setup
 

@@ -1,5 +1,10 @@
 # Changelog
 
+### 2026-04-21
+
+- **Fix other users' PRs leaking into PR mode** — when another user opened a PR on a branch that also had the authenticated user's PR (or same branch name), GitHub attached both PR numbers to each run's `pull_requests` field, causing the foreign PR to appear as its own row. Now filters collected PR numbers against `_fetch_user_open_prs` (applies to both the runs-based path and the `_fetch_prs_for_branch` fallback).
+- **Auto-update: drop git-mode, keep release-mode only** — the source-install update path (`git fetch`/`git pull`) could clobber uncommitted work, ignored the current branch, and confused fetch failures with "up to date". Removed entirely. Auto-update now only runs on frozen binaries (`.exe` / Linux binary) and downloads the matching GitHub Releases asset. Devs running from source update manually via git. Also: verify downloaded byte count against `asset["size"]` to catch truncation, clear cached release data after successful swap, and defer the update check until after the main window is shown (via `QTimer.singleShot(1500, …)`) so startup is no longer blocked by the modal dialog.
+
 ### 2026-04-17
 
 - **Codebase quality pass** — fix unbounded `_pr_cache`/`_review_cache` growth (entries now evicted when sub_key is removed), extract `_github_api_get()` helper to deduplicate 8+ identical HTTP request patterns, reuse `_icon_base()` in `_make_refresh_icon`/`_make_snooze_icon`/`_make_base_icon` (was reimplementing same 3 lines), extract `_draw_z_glyph()` helper for snooze icon, data-driven snooze icon style init, skip tray icon `setIcon()` when status unchanged (avoids unnecessary work every 500ms), add Qt `screens()` fallback in `_get_monitor_work_areas()` for Linux multi-monitor support.

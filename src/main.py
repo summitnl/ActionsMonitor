@@ -1185,6 +1185,7 @@ class PRWorkflowPoller(WorkflowPoller):
         except Exception:
             open_prs = []
         open_pr_branches = {pr["branch"] for pr in open_prs}
+        user_pr_numbers = {pr["number"] for pr in open_prs}
         for pr in open_prs:
             branch = pr["branch"]
             if branch in branches_with_runs:
@@ -1233,17 +1234,24 @@ class PRWorkflowPoller(WorkflowPoller):
         active_sub_keys: set[str] = set()
 
         for branch_name, branch_runs in active_branches.items():
-            # Collect all unique PR numbers across all runs for this branch
+            # Collect unique PR numbers across all runs for this branch.
+            # Filter to PRs authored by the user — runs attach all PRs on a
+            # branch, so other users' PRs would leak in otherwise.
             pr_numbers_seen: dict[int, str] = {}  # pr_num -> base_ref
             for r in branch_runs:
                 for pr_entry in (r.get("pull_requests") or []):
                     pr_num = pr_entry.get("number")
-                    if pr_num and pr_num not in pr_numbers_seen:
-                        pr_numbers_seen[pr_num] = pr_entry.get("base", {}).get("ref", "")
+                    if not pr_num or pr_num in pr_numbers_seen:
+                        continue
+                    if open_prs_ok and pr_num not in user_pr_numbers:
+                        continue
+                    pr_numbers_seen[pr_num] = pr_entry.get("base", {}).get("ref", "")
 
             # Fallback: query the Pulls API when workflow runs lack PR data
             if not pr_numbers_seen:
                 for pr_info in self._fetch_prs_for_branch(branch_name, token):
+                    if open_prs_ok and pr_info["number"] not in user_pr_numbers:
+                        continue
                     pr_numbers_seen[pr_info["number"]] = pr_info["base_ref"]
 
             # Build groups: one per PR, or a single fallback group if no PRs found
@@ -2373,33 +2381,11 @@ class UpdateChecker:
     def check() -> Optional[str]:
         """Returns a version string if an update is available, None otherwise.
 
-        Frozen builds check GitHub Releases; source builds use git.
+        Only frozen builds check for updates. Source installs sync via git manually.
         """
-        if getattr(sys, "frozen", False):
-            return UpdateChecker._check_release()
-        return UpdateChecker._check_git()
-
-    @staticmethod
-    def _check_git() -> Optional[str]:
-        """Git-based check for source installs."""
-        try:
-            subprocess.run(
-                ["git", "fetch", "origin", "main", "--quiet"],
-                cwd=_APP_DIR, timeout=15, capture_output=True,
-            )
-            local = subprocess.run(
-                ["git", "rev-parse", "HEAD"],
-                cwd=_APP_DIR, capture_output=True, text=True,
-            ).stdout.strip()
-            remote = subprocess.run(
-                ["git", "rev-parse", "origin/main"],
-                cwd=_APP_DIR, capture_output=True, text=True,
-            ).stdout.strip()
-            if local and remote and local != remote:
-                return remote[:7]
-        except Exception:
-            pass
-        return None
+        if not getattr(sys, "frozen", False):
+            return None
+        return UpdateChecker._check_release()
 
     @staticmethod
     def _check_release() -> Optional[str]:
@@ -2436,29 +2422,8 @@ class UpdateChecker:
 
     @staticmethod
     def apply_update() -> tuple[bool, str]:
-        """Download/pull latest. Returns (success, message)."""
-        if getattr(sys, "frozen", False):
-            return UpdateChecker._apply_release_update()
-        return UpdateChecker._apply_git_update()
-
-    @staticmethod
-    def _apply_git_update() -> tuple[bool, str]:
-        """Pull latest and install deps (source installs)."""
-        try:
-            result = subprocess.run(
-                ["git", "pull", "origin", "main"],
-                cwd=_APP_DIR, capture_output=True, text=True, timeout=30,
-            )
-            if result.returncode != 0:
-                return False, result.stderr.strip() or "git pull failed"
-            subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r",
-                 str(_APP_DIR / "src" / "requirements.txt"), "--quiet"],
-                cwd=_APP_DIR, capture_output=True, timeout=60,
-            )
-            return True, "Update complete"
-        except Exception as exc:
-            return False, str(exc)
+        """Download latest release binary. Returns (success, message)."""
+        return UpdateChecker._apply_release_update()
 
     @staticmethod
     def _apply_release_update() -> tuple[bool, str]:
@@ -2481,14 +2446,26 @@ class UpdateChecker:
                 return False, f"Asset '{asset_name}' not found in release"
 
             download_url = asset["browser_download_url"]
+            expected_size = asset.get("size")
             current_exe = Path(sys.executable)
             tmp_path = current_exe.with_suffix(".update")
 
+            bytes_written = 0
             with requests.get(download_url, stream=True, timeout=120) as dl:
                 dl.raise_for_status()
                 with open(tmp_path, "wb") as f:
                     for chunk in dl.iter_content(chunk_size=65536):
                         f.write(chunk)
+                        bytes_written += len(chunk)
+
+            if expected_size and bytes_written != expected_size:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return False, (
+                    f"Download size mismatch (got {bytes_written}, expected {expected_size})"
+                )
 
             if IS_WINDOWS:
                 old_path = current_exe.with_suffix(".old")
@@ -2502,6 +2479,7 @@ class UpdateChecker:
                 tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IEXEC)
                 tmp_path.rename(current_exe)
 
+            UpdateChecker._release_data = None
             return True, "Update complete"
         except Exception as exc:
             return False, str(exc)
@@ -2509,7 +2487,7 @@ class UpdateChecker:
     @staticmethod
     def restart_app():
         """Re-launch the app and exit the current process."""
-        if getattr(sys, "frozen", False) and IS_WINDOWS:
+        if IS_WINDOWS:
             subprocess.Popen([sys.executable] + sys.argv[1:])
             sys.exit(0)
         else:
@@ -2535,13 +2513,8 @@ class UpdateDialog(QDialog):
         version.setStyleSheet(f"color: {FG_MUTED}; font-size: 12px;")
         layout.addWidget(version)
 
-        if getattr(sys, "frozen", False):
-            link_text = "View release on GitHub"
-            link_url = f"{UpdateChecker.REPO_URL}/releases/tag/{commit_hash}"
-        else:
-            link_text = "View README on GitHub"
-            link_url = f"{UpdateChecker.REPO_URL}#readme"
-        link = _ClickableLabel(link_text, url_fn=lambda: link_url)
+        link_url = f"{UpdateChecker.REPO_URL}/releases/tag/{commit_hash}"
+        link = _ClickableLabel("View release on GitHub", url_fn=lambda: link_url)
         link.setStyleSheet(f"color: {FG_LINK}; font-size: 12px; text-decoration: underline;")
         layout.addWidget(link)
 
@@ -3538,15 +3511,18 @@ def main():
 
     config_mgr = ConfigManager()
 
-    # Check for updates
-    new_version = UpdateChecker.check()
-    if new_version:
-        dlg = UpdateDialog(new_version)
-        dlg.exec()
-
     event_queue: queue.Queue = queue.Queue()
     win = MainWindow(config_mgr, event_queue)
     win.show()
+
+    # Defer update check so startup isn't blocked by a modal dialog
+    def _check_for_updates():
+        new_version = UpdateChecker.check()
+        if new_version:
+            UpdateDialog(new_version, parent=win).exec()
+
+    QTimer.singleShot(1500, _check_for_updates)
+
     sys.exit(app.exec())
 
 

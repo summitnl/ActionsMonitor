@@ -102,7 +102,7 @@ ActorWorkflowPoller._poll()   # actor mode
 - **`QSystemTrayIcon`** — built into `MainWindow`; coloured PIL icons are converted to `QIcon` via `_pil_to_qpixmap()` and pre-generated at startup.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
 - **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers. On Windows, winotify toasts include the app icon (`APP_ICO`). Tracks recently notified `(wid, sub_key)` tuples via `_recently_notified` for blink-on-focus. Toast body `launch` points to `_focus.vbs` which creates `_focus_signal`; the main loop polls for this file and calls `_show_window()` + `_blink_row()` on matching rows.
-- **`UpdateChecker`** — on startup, compares local HEAD to `origin/main` via git. Skipped entirely when running as a frozen `.exe`.
+- **`UpdateChecker`** — on startup (frozen builds only), polls the GitHub Releases API and compares `BUILD_COMMIT` against the latest release. If behind, offers a modal dialog to download and swap the executable.
 
 ### Composite keys
 
@@ -163,7 +163,7 @@ Tooltips use Qt's built-in `widget.setToolTip(text)`. Styled via QSS in `DARK_ST
 
 ### Auto-update check
 
-On startup (before the main window), `UpdateChecker.check()` runs `git fetch origin main` and compares local HEAD against `origin/main`. If behind, a modal dialog offers to pull + restart. All git/network errors are silently ignored so the app always starts. **Skipped when frozen** (`sys.frozen`) since `git pull` cannot update a bundled `.exe`.
+Shortly after the main window appears (via `QTimer.singleShot(1500, ...)`), `UpdateChecker.check()` fetches the latest GitHub Release and compares `target_commitish`/`tag_name` against `BUILD_COMMIT`. If behind, a modal dialog offers to download the matching asset (`ActionsMonitor.exe` on Windows, `ActionsMonitor-linux` on Linux), swap it in, and restart. Downloaded bytes are verified against `asset["size"]` to catch truncation. All network errors are silently ignored so the app always starts. **Only runs when frozen** (`sys.frozen`); source installs update manually via git.
 
 ## Configuration
 
