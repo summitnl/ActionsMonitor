@@ -1387,20 +1387,27 @@ class PRWorkflowPoller(WorkflowPoller):
 
     def _fetch_user_open_prs(self, username: str, token: str) -> list[dict]:
         """Fetch open PRs authored by the user. Returns list of {number, branch, base_ref}.
-        Uses the creator= API filter to avoid fetching all repo PRs."""
+        Uses the creator= API filter to avoid fetching all repo PRs, but re-checks
+        user.login client-side — GitHub's creator= filter is loose and occasionally
+        returns PRs authored by someone else (observed: foreign PRs leaking in)."""
         url = (
             f"https://api.github.com/repos/{self.owner}/{self.repo}"
             f"/pulls?state=open&sort=updated&direction=desc&per_page=50"
             f"&creator={username}"
         )
+        username_lc = username.lower()
         results = []
         for pr in _github_api_get(url, token, self._session):
             pr_num = pr.get("number")
-            if pr_num:
-                branch = pr.get("head", {}).get("ref", "")
-                base_ref = pr.get("base", {}).get("ref", "")
-                self._cache_pr(pr_num, pr)
-                results.append({"number": pr_num, "branch": branch, "base_ref": base_ref})
+            if not pr_num:
+                continue
+            author = (pr.get("user") or {}).get("login", "")
+            if author.lower() != username_lc:
+                continue
+            branch = pr.get("head", {}).get("ref", "")
+            base_ref = pr.get("base", {}).get("ref", "")
+            self._cache_pr(pr_num, pr)
+            results.append({"number": pr_num, "branch": branch, "base_ref": base_ref})
         return results
 
     def _fetch_branch_runs(self, wf_file: str, branch: str, token: str) -> list[dict]:
@@ -2810,37 +2817,45 @@ class MainWindow(QMainWindow):
         footer_sep.setStyleSheet("background-color: #44403C;")
         footer_layout.addWidget(footer_sep)
 
-        # Footer row 1
+        # Footer row 1 — checkboxes
         row1 = QWidget()
         row1_layout = QHBoxLayout(row1)
-        row1_layout.setContentsMargins(14, 8, 14, 2)
-        hint = QLabel("Edit config.yaml to add/change workflows.")
-        hint.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
-        row1_layout.addWidget(hint)
-        row1_layout.addStretch()
-        open_btn = _ClickableLabel("Open config ↗", url_fn=lambda: None)
-        open_btn.setStyleSheet(f"color: {FG_LINK}; font-size: 11px; font-weight: bold;")
-        open_btn.mousePressEvent = lambda e: ConfigManager.open_in_editor()
-        row1_layout.addWidget(open_btn)
-        footer_layout.addWidget(row1)
+        row1_layout.setContentsMargins(14, 10, 14, 6)
+        row1_layout.setSpacing(18)
 
-        # Footer row 2
-        row2 = QWidget()
-        row2_layout = QHBoxLayout(row2)
-        row2_layout.setContentsMargins(14, 0, 14, 8)
+        state = self._load_state()
 
         if IS_WINDOWS:
             self._startup_cb = QCheckBox("Start with Windows")
             self._startup_cb.setChecked(StartupManager.is_enabled())
             self._startup_cb.toggled.connect(self._toggle_startup)
-            row2_layout.addWidget(self._startup_cb)
+            row1_layout.addWidget(self._startup_cb)
 
         self._aot_cb = QCheckBox("Always on top")
-        state = self._load_state()
         self._aot_cb.setChecked(state.get("always_on_top", False))
         self._aot_cb.toggled.connect(self._toggle_always_on_top)
-        row2_layout.addWidget(self._aot_cb)
+        row1_layout.addWidget(self._aot_cb)
+
+        self._min_tray_cb = QCheckBox("Minimize to tray on close")
+        self._min_tray_cb.setChecked(state.get("minimize_to_tray", True))
+        self._min_tray_cb.toggled.connect(self._toggle_minimize_to_tray)
+        row1_layout.addWidget(self._min_tray_cb)
+
+        row1_layout.addStretch()
+        footer_layout.addWidget(row1)
+
+        # Footer row 2 — config hint + link
+        row2 = QWidget()
+        row2_layout = QHBoxLayout(row2)
+        row2_layout.setContentsMargins(14, 6, 14, 10)
+        hint = QLabel("Edit config.yaml to add/change workflows.")
+        hint.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        row2_layout.addWidget(hint)
         row2_layout.addStretch()
+        open_btn = _ClickableLabel("Open config ↗", url_fn=lambda: None)
+        open_btn.setStyleSheet(f"color: {FG_LINK}; font-size: 11px; font-weight: bold;")
+        open_btn.mousePressEvent = lambda e: ConfigManager.open_in_editor()
+        row2_layout.addWidget(open_btn)
         footer_layout.addWidget(row2)
 
         main_layout.addWidget(footer)
@@ -2857,7 +2872,7 @@ class MainWindow(QMainWindow):
             tray_menu = QMenu()
             tray_menu.addAction("Show", self._show_window)
             tray_menu.addSeparator()
-            tray_menu.addAction("Quit", self._quit)
+            tray_menu.addAction("Close", self._quit)
             self._tray.setContextMenu(tray_menu)
             self._tray.activated.connect(self._on_tray_activated)
             self._tray.setToolTip(APP_NAME)
@@ -2899,6 +2914,14 @@ class MainWindow(QMainWindow):
         try:
             state = self._load_state()
             state["always_on_top"] = on_top
+            self._write_state(state)
+        except Exception:
+            pass
+
+    def _toggle_minimize_to_tray(self, enabled: bool):
+        try:
+            state = self._load_state()
+            state["minimize_to_tray"] = enabled
             self._write_state(state)
         except Exception:
             pass
@@ -3431,8 +3454,15 @@ class MainWindow(QMainWindow):
         self.activateWindow()
 
     def closeEvent(self, event):
-        event.ignore()
-        self._hide_window()
+        minimize = True
+        if hasattr(self, "_min_tray_cb"):
+            minimize = self._min_tray_cb.isChecked()
+        if minimize and self._tray:
+            event.ignore()
+            self._hide_window()
+        else:
+            event.accept()
+            self._quit()
 
     def changeEvent(self, event):
         super().changeEvent(event)
