@@ -205,9 +205,6 @@ _FOCUS_VBS     = _APP_DIR / "_focus.vbs"
 _FOCUS_SIGNAL  = _APP_DIR / "_focus_signal"
 
 
-_FOCUS_SH = _APP_DIR / "_focus.sh"
-
-
 def _ensure_focus_vbs():
     """Create a small VBScript that writes a signal file when executed (silent, no CMD flash)."""
     script = (
@@ -215,16 +212,6 @@ def _ensure_focus_vbs():
         f'fso.CreateTextFile "{_FOCUS_SIGNAL}", True\n'
     )
     _FOCUS_VBS.write_text(script, encoding="utf-8")
-
-
-def _ensure_focus_sh():
-    """Create a small shell script that writes a signal file when executed (Linux).
-    Note: currently unused — plyer notifications on Linux don't support a launch
-    callback, so clicking a toast won't trigger this script. Created for future
-    use when a Linux notification backend with launch support is added."""
-    script = f'#!/bin/sh\ntouch "{_FOCUS_SIGNAL}"\n'
-    _FOCUS_SH.write_text(script, encoding="utf-8")
-    _FOCUS_SH.chmod(_FOCUS_SH.stat().st_mode | stat.S_IEXEC)
 
 POLL_DEFAULT = 60  # seconds
 
@@ -502,6 +489,56 @@ def _github_api_get(url: str, token: str, session: Optional[requests.Session] = 
     resp = _get(url, params=params, headers=_gh_headers(token), timeout=timeout)
     resp.raise_for_status()
     return resp.json()
+
+
+def _aggregate_review_status(reviews: list[dict]) -> str:
+    """Collapse a PR reviews list to 'approved'/'changes_requested'/'commented'/'pending'."""
+    latest: dict[str, str] = {}
+    has_comments = False
+    for r in reviews:
+        user = r.get("user", {}).get("login", "")
+        state = r.get("state", "")
+        if state in ("APPROVED", "CHANGES_REQUESTED"):
+            latest[user] = state
+        elif state == "COMMENTED":
+            has_comments = True
+    if not latest:
+        return "commented" if has_comments else "pending"
+    if "CHANGES_REQUESTED" in latest.values():
+        return "changes_requested"
+    return "approved"
+
+
+def _cached_review_fetch(url: str, token: str, session: Optional[requests.Session],
+                         cache: dict, key, ttl: float) -> Optional[str]:
+    """Fetch+aggregate PR review status with per-key TTL cache. Returns stale value on API error."""
+    cached = cache.get(key)
+    if cached is not None:
+        status, fetch_time = cached
+        if time.monotonic() - fetch_time < ttl:
+            return status
+    try:
+        reviews = _github_api_get(url, token, session)
+        result = _aggregate_review_status(reviews)
+        cache[key] = (result, time.monotonic())
+        _prune_cache(cache, _REVIEW_CACHE_MAX)
+        return result
+    except Exception:
+        return cached[0] if cached else None
+
+
+# Cache caps — prevent unbounded growth over long sessions
+_PR_CACHE_MAX = 200
+_REVIEW_CACHE_MAX = 200
+
+
+def _prune_cache(cache: dict, max_size: int):
+    """Drop oldest entries (dict insertion order) until cache size <= max_size."""
+    excess = len(cache) - max_size
+    if excess <= 0:
+        return
+    for k in list(cache.keys())[:excess]:
+        cache.pop(k, None)
 
 
 def fetch_latest_run(
@@ -1144,6 +1181,7 @@ class PRWorkflowPoller(WorkflowPoller):
             "base_ref": pr_data.get("base", {}).get("ref", ""),
             "updated_at": pr_data.get("updated_at", ""),
         }
+        _prune_cache(self._pr_cache, _PR_CACHE_MAX)
 
     def _poll(self):
         cfg   = self.config_mgr.get()
@@ -1507,39 +1545,14 @@ class PRWorkflowPoller(WorkflowPoller):
         """Fetch the aggregate review status for a PR.
         Returns 'approved', 'changes_requested', 'commented', 'pending', or None.
         Cached for _review_cache_ttl seconds to reduce API calls."""
-        cached = self._review_cache.get(pr_number)
-        if cached is not None:
-            status, fetch_time = cached
-            if time.monotonic() - fetch_time < self._review_cache_ttl:
-                return status
-        try:
-            url = (
-                f"https://api.github.com/repos/{self.owner}/{self.repo}"
-                f"/pulls/{pr_number}/reviews"
-            )
-            reviews = _github_api_get(url, token, self._session)
-
-            # Keep only the latest review per reviewer (ignore PENDING/DISMISSED)
-            latest: dict[str, str] = {}
-            has_comments = False
-            for r in reviews:
-                user = r.get("user", {}).get("login", "")
-                state = r.get("state", "")
-                if state in ("APPROVED", "CHANGES_REQUESTED"):
-                    latest[user] = state
-                elif state == "COMMENTED":
-                    has_comments = True
-
-            if not latest:
-                result = "commented" if has_comments else "pending"
-            elif "CHANGES_REQUESTED" in latest.values():
-                result = "changes_requested"
-            else:
-                result = "approved"
-            self._review_cache[pr_number] = (result, time.monotonic())
-            return result
-        except Exception:
-            return cached[0] if cached else None
+        url = (
+            f"https://api.github.com/repos/{self.owner}/{self.repo}"
+            f"/pulls/{pr_number}/reviews"
+        )
+        return _cached_review_fetch(
+            url, token, self._session,
+            self._review_cache, pr_number, self._review_cache_ttl,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1885,39 +1898,15 @@ class URLQueryPoller(WorkflowPoller):
             "head_ref": data.get("head", {}).get("ref", ""),
         }
         self._pr_cache[key] = detail
+        _prune_cache(self._pr_cache, _PR_CACHE_MAX)
         return detail
 
     def _fetch_review_status(self, owner: str, repo: str, pr_num: int, token: str) -> Optional[str]:
-        key = (owner, repo, pr_num)
-        cached = self._review_cache.get(key)
-        if cached is not None:
-            status, fetch_time = cached
-            if time.monotonic() - fetch_time < self._review_cache_ttl:
-                return status
-        try:
-            reviews = _github_api_get(
-                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/reviews",
-                token, self._session,
-            )
-            latest: dict[str, str] = {}
-            has_comments = False
-            for r in reviews:
-                user = r.get("user", {}).get("login", "")
-                rstate = r.get("state", "")
-                if rstate in ("APPROVED", "CHANGES_REQUESTED"):
-                    latest[user] = rstate
-                elif rstate == "COMMENTED":
-                    has_comments = True
-            if not latest:
-                result = "commented" if has_comments else "pending"
-            elif "CHANGES_REQUESTED" in latest.values():
-                result = "changes_requested"
-            else:
-                result = "approved"
-            self._review_cache[key] = (result, time.monotonic())
-            return result
-        except Exception:
-            return cached[0] if cached else None
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/reviews"
+        return _cached_review_fetch(
+            url, token, self._session,
+            self._review_cache, (owner, repo, pr_num), self._review_cache_ttl,
+        )
 
     def _remove_sub_key(self, sk: str):
         super()._remove_sub_key(sk)
@@ -3595,6 +3584,8 @@ class MainWindow(QMainWindow):
         self._wid_container: dict[int, QWidget] = {}
         self._section_content: dict[str, QWidget] = {}
         self._section_content_layout: dict[str, QVBoxLayout] = {}
+        # Reverse lookup: id(content_widget) → section title. Avoids O(n) scans in _apply_event.
+        self._container_to_title: dict[int, str] = {}
         self._section_indicators: dict[str, QLabel] = {}
         self._collapsed: dict[str, bool] = {}
         self._section_sort: dict[str, Optional[str]] = {}
@@ -3972,6 +3963,7 @@ class MainWindow(QMainWindow):
         content.setVisible(not is_collapsed)
         self._section_content[title] = content
         self._section_content_layout[title] = content_layout
+        self._container_to_title[id(content)] = title
         section_layout.addWidget(content)
 
         return content
@@ -4152,6 +4144,7 @@ class MainWindow(QMainWindow):
         self._wid_container.clear()
         self._section_content.clear()
         self._section_content_layout.clear()
+        self._container_to_title.clear()
         self._section_indicators.clear()
         self._sort_labels.clear()
 
@@ -4232,7 +4225,7 @@ class MainWindow(QMainWindow):
             alt = len(self._rows) % 2 == 1
             jira_url = cfg.get("jira_base_url", "")
             content_layout = self._section_content_layout.get(
-                next((t for t, c in self._section_content.items() if c is container), ""))
+                self._container_to_title.get(id(container), ""))
             row = WorkflowRow(None, wid, state, alt, jira_base_url=jira_url,
                               sub_key=None, snooze_cb=self._show_row_ctx_menu)
             if content_layout:
@@ -4319,7 +4312,7 @@ class MainWindow(QMainWindow):
             elif event.sub_key is not None:
                 container = self._wid_container.get(event.workflow_id, self._scroll_content)
                 content_layout = self._section_content_layout.get(
-                    next((t for t, c in self._section_content.items() if c is container), ""))
+                    self._container_to_title.get(id(container), ""))
                 alt = len(self._rows) % 2 == 1
                 new_row = WorkflowRow(None, event.workflow_id, event.new_state, alt,
                                       jira_base_url=jira_url, sub_key=event.sub_key,
@@ -4396,6 +4389,13 @@ class MainWindow(QMainWindow):
             if sk:
                 saved_by_stable.append((sk, sub_key))
         self._stop_all_pollers()
+        # Drain any in-flight events from the old pollers — they reference stale wids
+        # which would race with the new poller set and could cause KeyErrors.
+        try:
+            while True:
+                self._event_queue.get_nowait()
+        except queue.Empty:
+            pass
         self._rows.clear()
         self._states.clear()
         self._snoozed.clear()
@@ -4537,7 +4537,7 @@ class MainWindow(QMainWindow):
         self._stop_all_pollers()
         if self._tray:
             self._tray.hide()
-        for f in [_FOCUS_SIGNAL, _FOCUS_VBS, _FOCUS_SH]:
+        for f in [_FOCUS_SIGNAL, _FOCUS_VBS]:
             try:
                 f.unlink(missing_ok=True)
             except OSError:
@@ -4558,8 +4558,6 @@ def main():
 
     if IS_WINDOWS:
         _ensure_focus_vbs()
-    elif IS_LINUX:
-        _ensure_focus_sh()
 
     app = QApplication(sys.argv)
     app.setStyleSheet(DARK_STYLESHEET)
