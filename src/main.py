@@ -1289,9 +1289,38 @@ class PRWorkflowPoller(WorkflowPoller):
                 active_sub_keys.add(sub_key)
                 self._last_seen[sub_key] = now
 
-                # Snoozed rows: skip status checks, review fetches, and notifications.
-                # Row stays in active_sub_keys so it isn't culled as stale.
+                # Snoozed rows: emit a minimal event (from already-fetched bulk data) so the
+                # row renders after restart, then skip per-PR extras (draft/review fetches)
+                # and notifications. Row stays in active_sub_keys so it isn't culled as stale.
                 if _is_snoozed(self.wid, sub_key):
+                    run_statuses = [
+                        _resolve_status(r.get("status"), r.get("conclusion"))
+                        for r in group_runs
+                    ]
+                    agg_status = _worst_status(set(run_statuses)) if run_statuses else ST_UNKNOWN
+                    snoozed_state = WorkflowState(
+                        name=self.name_display,
+                        url=self.cfg_entry.get("url", ""),
+                        branch=branch_name,
+                        head_branch=branch_name,
+                    )
+                    snoozed_state.last_check = now
+                    snoozed_state.status = agg_status
+                    prefix, short = parse_branch_prefix(branch_name)
+                    snoozed_state.branch_prefix = prefix
+                    snoozed_state.branch_short = short
+                    snoozed_state.jira_key = extract_jira_key(branch_name)
+                    if pr_num is not None:
+                        snoozed_state.pr_number = pr_num
+                        snoozed_state.pr_target = pr_base_ref or ""
+                        snoozed_state.pr_url = (
+                            f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
+                        )
+                        cached = self._pr_cache.get(pr_num, {})
+                        snoozed_state.pr_title = cached.get("title")
+                        snoozed_state.is_draft = cached.get("draft", False)
+                    self.event_queue.put(
+                        StatusEvent(self.wid, snoozed_state, sub_key=sub_key))
                     continue
 
                 # Determine per-run statuses and pick the aggregate + representative run
@@ -1589,8 +1618,29 @@ class ActorWorkflowPoller(WorkflowPoller):
         for composite_key, run in active_keys.items():
             self._last_seen[composite_key] = now
 
-            # Snoozed rows: skip status resolution and notifications
+            # Snoozed rows: emit minimal state from bulk data so the row renders after restart,
+            # skip notifications and transition tracking.
             if _is_snoozed(self.wid, composite_key):
+                hb_snz = run.get("head_branch", "")
+                snoozed_state = WorkflowState(
+                    name=run.get("name", "unknown"),
+                    url=self.cfg_entry.get("url", ""),
+                    branch=hb_snz,
+                    head_branch=hb_snz,
+                )
+                snoozed_state.last_check = now
+                snoozed_state.status = _resolve_status(
+                    run.get("status"), run.get("conclusion"))
+                snoozed_state.run_id = run.get("id")
+                snoozed_state.run_url = run.get("html_url")
+                snoozed_state.run_number = run.get("run_number")
+                if hb_snz:
+                    prefix, short = parse_branch_prefix(hb_snz)
+                    snoozed_state.branch_prefix = prefix
+                    snoozed_state.branch_short = short
+                    snoozed_state.jira_key = extract_jira_key(hb_snz)
+                self.event_queue.put(
+                    StatusEvent(self.wid, snoozed_state, sub_key=composite_key))
                 continue
 
             run_id     = run.get("id")
@@ -1738,8 +1788,32 @@ class URLQueryPoller(WorkflowPoller):
             active.add(sub_key)
             self._last_seen[sub_key] = now
 
-            # Snoozed rows: skip per-PR detail + review fetches and event emission
+            # Snoozed rows: emit a minimal state built from the bulk search result so the
+            # row renders after restart, skip per-PR detail + review fetches.
             if _is_snoozed(self.wid, sub_key):
+                cached_detail = self._pr_cache.get((owner, repo, pr_num)) or {}
+                head_branch = cached_detail.get("head_ref", "")
+                snoozed_state = WorkflowState(
+                    name=f"{owner}/{repo}",
+                    url=item.get("html_url", ""),
+                    branch=head_branch or None,
+                    head_branch=head_branch or None,
+                )
+                snoozed_state.last_check = now
+                snoozed_state.status = ST_UNKNOWN
+                snoozed_state.pr_number = pr_num
+                snoozed_state.pr_title = item.get("title") or None
+                snoozed_state.pr_url = item.get("html_url", "")
+                snoozed_state.pr_target = cached_detail.get("base_ref", "")
+                snoozed_state.is_draft = cached_detail.get(
+                    "draft", bool(item.get("draft", False)))
+                if head_branch:
+                    prefix, short = parse_branch_prefix(head_branch)
+                    snoozed_state.branch_prefix = prefix
+                    snoozed_state.branch_short = short
+                    snoozed_state.jira_key = extract_jira_key(head_branch)
+                self.event_queue.put(
+                    StatusEvent(self.wid, snoozed_state, sub_key=sub_key))
                 continue
 
             pr_detail     = self._fetch_pr_detail(owner, repo, pr_num, token)
@@ -2074,7 +2148,7 @@ def _make_help_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
 
 # --- Snooze button icon (bell / bell-off) ---
 
-_SNOOZE_ICON_SIZE = 24
+_SNOOZE_ICON_SIZE = 16
 
 
 def _draw_bell_glyph(draw: ImageDraw.Draw, hi: int, fg_colour: str):
@@ -2725,18 +2799,6 @@ class WorkflowRow(QWidget):
         self._icon_lbl.setPixmap(pixmap)
         self._icon_lbl.setFixedSize(24, 24)
         left_col.addWidget(self._icon_lbl, 0, Qt.AlignmentFlag.AlignHCenter)
-
-        # Snooze button
-        self._snooze_btn = QLabel()
-        self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
-        self._snooze_btn.setFixedSize(24, 24)
-        self._snooze_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._snooze_btn.setToolTip("Snooze — pause polling, dim the row, mute notifications")
-        self._snooze_btn.mousePressEvent = lambda e: self._toggle_snooze()
-        self._snooze_btn.enterEvent = lambda e: self._snooze_hover_enter()
-        self._snooze_btn.leaveEvent = lambda e: self._snooze_hover_leave()
-        self._snooze_btn.setVisible(True)
-        left_col.addWidget(self._snooze_btn, 0, Qt.AlignmentFlag.AlignHCenter)
         main_layout.addLayout(left_col)
 
         # Centre column
@@ -2812,14 +2874,30 @@ class WorkflowRow(QWidget):
 
         main_layout.addLayout(centre, 1)
 
-        # Right column: poll rate (fixed width, never pushed off-screen)
+        # Right column: poll rate + compact snooze button
+        right_col = QHBoxLayout()
+        right_col.setContentsMargins(4, 10, 12, 0)
+        right_col.setSpacing(4)
+
         self._poll_lbl = QLabel()
         self._poll_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
         self._poll_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignTop)
-        self._poll_lbl.setContentsMargins(4, 10, 12, 0)
-        self._poll_lbl.setMinimumWidth(70)
-        self._poll_lbl.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
-        main_layout.addWidget(self._poll_lbl)
+        right_col.addWidget(self._poll_lbl)
+
+        self._snooze_btn = QLabel()
+        self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
+        self._snooze_btn.setFixedSize(16, 16)
+        self._snooze_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._snooze_btn.setToolTip("Snooze — pause polling, dim the row, mute notifications")
+        self._snooze_btn.mousePressEvent = lambda e: self._toggle_snooze()
+        self._snooze_btn.enterEvent = lambda e: self._snooze_hover_enter()
+        self._snooze_btn.leaveEvent = lambda e: self._snooze_hover_leave()
+        right_col.addWidget(self._snooze_btn, 0, Qt.AlignmentFlag.AlignTop)
+
+        right_wrap = QWidget()
+        right_wrap.setLayout(right_col)
+        right_wrap.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
+        main_layout.addWidget(right_wrap)
 
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self._apply_background()
@@ -2905,7 +2983,7 @@ class WorkflowRow(QWidget):
                 f"background-color: {COLOUR.get(state.status, COLOUR[ST_UNKNOWN])};")
             pixmap = _status_qpixmaps.get(state.status, _status_qpixmaps.get(ST_UNKNOWN))
             self._icon_lbl.setPixmap(pixmap)
-        self._poll_lbl.setText(f"every {poll_rate}s")
+        self._poll_lbl.setText(f"{poll_rate}s")
         self._update_labels()
 
     def _update_labels(self):
@@ -3508,6 +3586,8 @@ class MainWindow(QMainWindow):
         self._states: dict[tuple[int, Optional[str]], WorkflowState] = {}
         self._rows: dict[tuple[int, Optional[str]], WorkflowRow] = {}
         self._snoozed: set[tuple[int, Optional[str]]] = set()
+        # Stable identifier per workflow (mode:url or mode:query) — survives wid shifts on reload
+        self._wid_stable_keys: dict[int, str] = {}
         self._tray: Optional[QSystemTrayIcon] = None
         self._tray_icons: dict[str, QIcon] = {}
         self._prev_tray_status: Optional[str] = None
@@ -3549,6 +3629,7 @@ class MainWindow(QMainWindow):
             lambda: self._toggle_snooze(self._ctx_menu_target) if self._ctx_menu_target else None)
 
         self._start_pollers()
+        self._restore_snoozed_state()
 
         # Timers
         self._drain_timer = QTimer(self)
@@ -3914,6 +3995,14 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _save_snoozed_state(self):
+        try:
+            state = self._load_state()
+            self._persist_snoozed(state)
+            self._write_state(state)
+        except Exception:
+            pass
+
     # ------------------------------------------------------------------
     # Section sorting
     # ------------------------------------------------------------------
@@ -4023,6 +4112,29 @@ class MainWindow(QMainWindow):
             self._section_sort[title] = sort_mode
         self._update_sort_labels()
 
+    def _restore_snoozed_state(self):
+        """Rebuild self._snoozed + _snoozed_keys from state.json using stable workflow keys.
+        Must run after self._wid_stable_keys is populated. Branch-mode rows that already exist
+        get set_snoozed(True); dynamic rows pick it up when created via _drain_queue."""
+        state = self._load_state()
+        snoozed_cfg = state.get("snoozed") or {}
+        if not snoozed_cfg:
+            return
+        stable_to_wid = {sk: wid for wid, sk in self._wid_stable_keys.items()}
+        with _snoozed_lock:
+            for sk, sub_keys in snoozed_cfg.items():
+                wid = stable_to_wid.get(sk)
+                if wid is None:
+                    continue
+                for sub_key in sub_keys:
+                    key = (wid, sub_key)
+                    self._snoozed.add(key)
+                    _snoozed_keys.add(key)
+        for key in self._snoozed:
+            row = self._rows.get(key)
+            if row:
+                row.set_snoozed(True)
+
     def _resort_section_for_wid(self, wid: int):
         container = self._wid_container.get(wid)
         if not container:
@@ -4046,11 +4158,26 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     # Pollers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _workflow_stable_key(entry: dict) -> str:
+        """Identifier stable across wid shifts. Used to persist per-row state."""
+        mode = entry.get("mode", "branch")
+        if mode == "url":
+            ident = entry.get("query") or ""
+        else:
+            ident = entry.get("url") or ""
+        return f"{mode}:{ident}"
+
     def _start_pollers(self):
         cfg = self._config_mgr.get()
         notif_cfg = cfg.get("notifications", {})
         NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 3)))
         workflows = cfg.get("workflows") or []
+
+        self._wid_stable_keys = {
+            wid: self._workflow_stable_key(entry)
+            for wid, entry in enumerate(workflows)
+        }
 
         branch_container = None
         _DEFAULT_SECTION_TITLES = {
@@ -4200,6 +4327,8 @@ class MainWindow(QMainWindow):
                 if content_layout:
                     content_layout.addWidget(new_row)
                 new_row.update(event.new_state, poll_rate, jira_base_url=jira_url)
+                if key in self._snoozed:
+                    new_row.set_snoozed(True)
                 self._rows[key] = new_row
             self._resort_section_for_wid(event.workflow_id)
 
@@ -4228,6 +4357,7 @@ class MainWindow(QMainWindow):
         if row:
             row.set_snoozed(key in self._snoozed)
         self._update_tray()
+        self._save_snoozed_state()
 
     def _unsnooze(self, key: tuple[int, Optional[str]]):
         self._snoozed.discard(key)
@@ -4259,11 +4389,12 @@ class MainWindow(QMainWindow):
 
     def _reload_pollers(self):
         global _cached_github_username
-        # Preserve snooze state across config hot-reloads
-        saved_snoozed = set(self._snoozed)
-        saved_snoozed_keys = set()
-        with _snoozed_lock:
-            saved_snoozed_keys = set(_snoozed_keys)
+        # Snapshot snooze state by stable workflow key so wid shifts across edits don't break it
+        saved_by_stable: list[tuple[str, Optional[str]]] = []
+        for wid, sub_key in self._snoozed:
+            sk = self._wid_stable_keys.get(wid)
+            if sk:
+                saved_by_stable.append((sk, sub_key))
         self._stop_all_pollers()
         self._rows.clear()
         self._states.clear()
@@ -4274,10 +4405,16 @@ class MainWindow(QMainWindow):
         with _github_username_lock:
             _cached_github_username = None
         self._start_pollers()
-        # Restore snooze state
-        self._snoozed = saved_snoozed
+        # Restore snooze state using new wid mapping
+        stable_to_wid = {sk: wid for wid, sk in self._wid_stable_keys.items()}
         with _snoozed_lock:
-            _snoozed_keys.update(saved_snoozed_keys)
+            for sk, sub_key in saved_by_stable:
+                wid = stable_to_wid.get(sk)
+                if wid is None:
+                    continue
+                key = (wid, sub_key)
+                self._snoozed.add(key)
+                _snoozed_keys.add(key)
 
     # ------------------------------------------------------------------
     # Window state persistence
@@ -4305,6 +4442,18 @@ class MainWindow(QMainWindow):
         else:
             state.pop("collapsed_sections", None)
 
+    def _persist_snoozed(self, state: dict):
+        grouped: dict[str, list] = {}
+        for wid, sub_key in self._snoozed:
+            sk = self._wid_stable_keys.get(wid)
+            if not sk:
+                continue
+            grouped.setdefault(sk, []).append(sub_key)
+        if grouped:
+            state["snoozed"] = grouped
+        else:
+            state.pop("snoozed", None)
+
     def _save_window_state(self):
         try:
             state = self._load_state()
@@ -4315,6 +4464,7 @@ class MainWindow(QMainWindow):
                 "width": size.width(), "height": size.height(),
             }
             self._persist_collapsed(state)
+            self._persist_snoozed(state)
             sorts = {t: s for t, s in self._section_sort.items() if s is not None}
             if sorts:
                 state["section_sort"] = sorts
