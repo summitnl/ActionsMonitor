@@ -2004,6 +2004,51 @@ def _make_refresh_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
+def _make_update_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
+    """Lucide arrow-down-to-line icon: downward arrow above a short baseline."""
+    img, draw, hi = _icon_base(size)
+    sw = max(3, round(hi / 16 * 2.2))
+    cx = hi / 2
+    top_y = hi * 0.22
+    bot_y = hi * 0.70
+    draw.line([(cx, top_y), (cx, bot_y)], fill=colour, width=sw)
+    head = hi * 0.18
+    draw.polygon([
+        (cx, bot_y + head * 0.6),
+        (cx - head, bot_y - head * 0.2),
+        (cx + head, bot_y - head * 0.2),
+    ], fill=colour)
+    base_y = hi * 0.86
+    draw.line([(cx - hi * 0.26, base_y), (cx + hi * 0.26, base_y)],
+              fill=colour, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _make_help_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
+    """Lucide circle-help icon: question mark inside an outlined circle."""
+    img, draw, hi = _icon_base(size)
+    sw = max(3, round(hi / 16 * 2.2))
+    cx, cy = hi / 2, hi / 2
+    r = hi * 0.42
+    draw.ellipse([cx - r, cy - r, cx + r, cy + r], outline=colour, width=sw)
+    fsize = int(hi * 0.58)
+    font = None
+    for fname in ("segoeuib.ttf", "DejaVuSans-Bold.ttf", "LiberationSans-Bold.ttf", "FreeSansBold.ttf"):
+        try:
+            font = ImageFont.truetype(fname, fsize)
+            break
+        except Exception:
+            continue
+    if font is None:
+        font = ImageFont.load_default()
+    bbox = draw.textbbox((0, 0), "?", font=font)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    tx = (hi - tw) / 2 - bbox[0]
+    ty = (hi - th) / 2 - bbox[1]
+    draw.text((tx, ty), "?", fill=colour, font=font)
+    return img.resize((size, size), Image.LANCZOS)
+
+
 # --- Snooze button icon (crescent moon) ---
 
 _SNOOZE_ICON_SIZE = 24
@@ -3510,12 +3555,37 @@ class MainWindow(QMainWindow):
         header_layout.addWidget(title_lbl)
         header_layout.addStretch()
 
-        refresh_pm = _pil_to_qpixmap(_make_refresh_icon(24))
-        refresh_btn = QLabel()
-        refresh_btn.setPixmap(refresh_pm)
-        refresh_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        refresh_btn.setToolTip("Refresh all workflows")
-        refresh_btn.mousePressEvent = lambda e: self._refresh_all()
+        def _mk_icon_btn(pm: QPixmap, tooltip: str, handler) -> QLabel:
+            pm.setDevicePixelRatio(2.0)
+            btn = QLabel()
+            btn.setPixmap(pm)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setToolTip(tooltip)
+            btn.setStyleSheet("background: transparent; padding: 0; margin: 0;")
+            btn.mousePressEvent = lambda e: handler()
+            return btn
+
+        help_btn = _mk_icon_btn(
+            _pil_to_qpixmap(_make_help_icon(48)),
+            "Open README on GitHub",
+            lambda: webbrowser.open(f"{UpdateChecker.REPO_URL}/blob/main/README.md"),
+        )
+        header_layout.addWidget(help_btn)
+        header_layout.addSpacing(8)
+
+        update_btn = _mk_icon_btn(
+            _pil_to_qpixmap(_make_update_icon(48)),
+            "Check for updates",
+            lambda: self._check_for_updates(manual=True),
+        )
+        header_layout.addWidget(update_btn)
+        header_layout.addSpacing(8)
+
+        refresh_btn = _mk_icon_btn(
+            _pil_to_qpixmap(_make_refresh_icon(48)),
+            "Refresh all workflows",
+            self._refresh_all,
+        )
         header_layout.addWidget(refresh_btn)
 
         main_layout.addWidget(header)
@@ -4022,6 +4092,24 @@ class MainWindow(QMainWindow):
         for p in self._pollers.values():
             p.trigger_poll()
 
+    def _check_for_updates(self, manual: bool = False):
+        if not getattr(sys, "frozen", False):
+            if manual:
+                QMessageBox.information(
+                    self, "Updates",
+                    "Updates are only available in packaged builds.\n\n"
+                    "Source installs: run `git pull` in the repo.",
+                )
+            return
+        new_version = UpdateChecker.check()
+        if new_version:
+            UpdateDialog(new_version, parent=self).exec()
+        elif manual:
+            QMessageBox.information(
+                self, "Up to date",
+                f"You're on the latest version ({BUILD_COMMIT}).",
+            )
+
     # ------------------------------------------------------------------
     # Queue drain
     # ------------------------------------------------------------------
@@ -4303,12 +4391,7 @@ def main():
     win.show()
 
     # Defer update check so startup isn't blocked by a modal dialog
-    def _check_for_updates():
-        new_version = UpdateChecker.check()
-        if new_version:
-            UpdateDialog(new_version, parent=win).exec()
-
-    QTimer.singleShot(1500, _check_for_updates)
+    QTimer.singleShot(1500, win._check_for_updates)
 
     sys.exit(app.exec())
 
