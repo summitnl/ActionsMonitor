@@ -1,27 +1,30 @@
 {
-    "version": "2026.04.22",
-    "description": "Desktop monitor for GitHub Actions workflows and pull requests.",
-    "homepage": "https://github.com/summitnl/ActionsMonitor",
-    "license": "Summit Free Use License",
-    "url": "https://github.com/summitnl/ActionsMonitor/releases/download/v2026.04.22/ActionsMonitor.exe",
-    "hash": "463C4F1ECCE17F500340159842A3E334FE5B2634887E738671AD8D4C7014C45D",
-    "bin": "ActionsMonitor.exe",
-    "shortcuts": [
-        ["ActionsMonitor.exe", "Actions Monitor"]
-    ],
-    "pre_install": [
-        "if (-not (Test-Path \"$persist_dir\\config.yaml\")) { New-Item \"$persist_dir\\config.yaml\" -ItemType File -Force | Out-Null }",
-        "if (-not (Test-Path \"$persist_dir\\state.json\")) { Set-Content -Path \"$persist_dir\\state.json\" -Value '{}' -Encoding utf8 -NoNewline }"
-    ],
-    "post_install": [
-        "if (-not (Get-Process ActionsMonitor -ErrorAction SilentlyContinue)) { Start-Process \"$dir\\ActionsMonitor.exe\" }"
-    ],
-    "persist": [
-        "config.yaml",
-        "state.json"
-    ],
-    "checkver": "github",
-    "autoupdate": {
-        "url": "https://github.com/summitnl/ActionsMonitor/releases/download/v$version/ActionsMonitor.exe"
-    }
+  "version": "2026.04.22.2",
+  "description": "Desktop monitor for GitHub Actions workflows and pull requests.",
+  "homepage": "https://github.com/summitnl/ActionsMonitor",
+  "license": "Summit Free Use License",
+  "url": "https://github.com/summitnl/ActionsMonitor/releases/download/v2026.04.22.2/ActionsMonitor.exe",
+  "hash": "8A347A4881F55BED5DE816C5979DC91A54DAABA01A6E0D2DAC9DBA9C108B2ACB",
+  "bin": "ActionsMonitor.exe",
+  "shortcuts": [
+    [
+      "ActionsMonitor.exe",
+      "Actions Monitor"
+    ]
+  ],
+  "pre_install": [
+    "if (-not (Test-Path \"$persist_dir\\config.yaml\")) { New-Item \"$persist_dir\\config.yaml\" -ItemType File -Force | Out-Null }",
+    "if (-not (Test-Path \"$persist_dir\\state.json\")) { Set-Content -Path \"$persist_dir\\state.json\" -Value '{}' -Encoding utf8 -NoNewline }"
+  ],
+  "post_install": [
+    "if (-not (Get-Process ActionsMonitor -ErrorAction SilentlyContinue)) { Start-Process \"$dir\\ActionsMonitor.exe\" }"
+  ],
+  "persist": [
+    "config.yaml",
+    "state.json"
+  ],
+  "checkver": "github",
+  "autoupdate": {
+    "url": "https://github.com/summitnl/ActionsMonitor/releases/download/v$version/ActionsMonitor.exe"
+  }
 }
