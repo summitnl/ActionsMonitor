@@ -91,6 +91,7 @@ ActorWorkflowPoller._poll()   # actor mode
 - **Branch mode** (`mode: "branch"`, default) — one fixed row per workflow+branch combo. Uses `WorkflowPoller`.
 - **PR mode** (`mode: "pr"`) — one row per active PR the authenticated user authored. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Uses `PRWorkflowPoller`. Rows are created dynamically and auto-removed after `pr_stale_after` (default `"5m"`). Shows a colour-escalating staleness badge based on `staleness_thresholds`.
 - **Actor mode** (`mode: "actor"`) — one row per recent workflow run by the authenticated user across all workflows in a repo. Uses `ActorWorkflowPoller`. Supports `filter: "failed"` to show only failed runs. Rows are created dynamically and auto-removed after `stale_after` (default `"5m"`).
+- **URL mode** (`mode: "url"`) — one row per PR returned by a GitHub Search API query (`query: "is:pr is:open review-requested:@me"`, etc.). Uses `URLQueryPoller`. Spans repos, so caches are keyed by `(owner, repo, pr_num)`. Row status is derived from review state (approved → success icon, changes-requested → failure icon, else unknown) rather than CI status, so URL sections don't noisily escalate tray colour. No notifications. `@me` is substituted with the authenticated user's login. Sub-key format: `owner/repo#pr_num`.
 
 ### Key classes
 
@@ -98,6 +99,7 @@ ActorWorkflowPoller._poll()   # actor mode
 - **`WorkflowPoller`** — one per configured workflow (branch mode); tracks previous `run_id` / `status` to detect transitions and decide which notification type to fire (`new_run`, `success`, `failure`). Base class for `PRWorkflowPoller` and `ActorWorkflowPoller`. Owns a `requests.Session` for connection reuse and provides shared `_detect_notification()` and `_remove_sub_key()` helpers.
 - **`PRWorkflowPoller`** — subclass of `WorkflowPoller` (PR mode); fetches runs filtered by actor, groups by `head_branch` then by PR number, tracks per-(branch, PR) state, emits removal events for stale entries. Supports multiple PRs per branch (e.g. hotfix targeting both acceptance and production). Discovers all open user PRs via the Pulls API to ensure branches with old CI runs still appear. Fetches and caches PR draft status (refreshed every poll), title, and target branch.
 - **`ActorWorkflowPoller`** — subclass of `WorkflowPoller` (actor mode); fetches runs via repo-level `/actions/runs?actor=...`, groups by `workflow_name:head_branch`, supports client-side `filter: "failed"`. Uses `parse_actor_url()` for the different URL format.
+- **`URLQueryPoller`** — subclass of `WorkflowPoller` (URL mode); runs a user-supplied `q=` string against `/search/issues`, filters to PR results, and fetches PR detail + review status for each. Maps review state to row `status` so the icon reflects the review signal. Skips notification emission entirely. Caches (`_pr_cache`, `_review_cache`) keyed by `(owner, repo, pr_num)` because queries span repos.
 - **`WorkflowRow`** — `QWidget` subclass with three lines: title, optional badges (prefix + DRAFT), and status text. PR rows hide the workflow name (shown in the section header) and display PR# + branch as the title. Has a coloured left accent bar and a Lucide-style status icon.
 - **`QSystemTrayIcon`** — built into `MainWindow`; coloured PIL icons are converted to `QIcon` via `_pil_to_qpixmap()` and pre-generated at startup.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
@@ -106,7 +108,7 @@ ActorWorkflowPoller._poll()   # actor mode
 
 ### Composite keys
 
-`MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows, `branch#pr_num` for PR-mode rows (or just `branch` when no PR is detected), and a composite string for actor-mode rows. This allows multiple dynamic rows per poller, including multiple PRs from the same branch.
+`MainWindow._states` and `_rows` are keyed by `(workflow_id, sub_key)` where `sub_key` is `None` for branch-mode rows, `branch#pr_num` for PR-mode rows (or just `branch` when no PR is detected), a composite string for actor-mode rows, and `owner/repo#pr_num` for URL-mode rows. This allows multiple dynamic rows per poller, including multiple PRs from the same branch.
 
 ### Section sorting
 

@@ -176,4 +176,63 @@ workflows:
   #   mode: "actor"
   #   filter: "failed"
   #   polling_rate: 120
+
+  # ---------------------------------------------------------------------------
+  # Example: URL mode — one row per PR matching a GitHub Search query
+  # ---------------------------------------------------------------------------
+  # Runs an arbitrary GitHub pull-request search and renders each PR result as
+  # its own row. Lets you build custom "inboxes" (PRs needing review, PRs you
+  # authored across all repos, PRs with a given label, etc.) without tying to
+  # a single workflow file.
+  #
+  # Uses the GitHub Search API (/search/issues). Full filter syntax:
+  #   https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests
+  #
+  # Common filters:
+  #   is:pr is:open                      # open PRs (always include this)
+  #   is:draft / -is:draft               # only drafts / non-drafts
+  #   review-requested:@me               # PRs requesting your review
+  #   review:approved / review:changes_requested
+  #   author:@me                         # PRs you authored
+  #   assignee:@me                       # PRs assigned to you
+  #   user:summitnl                      # limit to an org
+  #   repo:summitnl/HippoCampus          # limit to one repo
+  #   label:"priority:high"              # by label
+  #   updated:>2026-01-01                # activity window
+  #
+  # `@me` is auto-substituted with your authenticated GitHub login.
+  #
+  # URL mode requires a GitHub token (the Search API is auth-gated at any
+  # meaningful rate). Rate limit: 30 requests/minute authenticated.
+  #
+  # Row status is derived from the review state (approved / changes-requested),
+  # not CI status. Draft, review, Jira and staleness badges behave the same as
+  # PR mode. Notifications are not emitted for URL-mode rows.
+  #
+  # - mode: "url"
+  #   name: "PRs - Needs My Review"         # Required: section title
+  #   query: "is:pr is:open review-requested:@me"
+  #   polling_rate: 120                     # Optional: seconds (default: 60)
+  #   max_results: 20                       # Optional: cap results (default: 20, max 100)
+  #   stale_after: "5m"                     # Optional: remove rows missing for this long
+  #
+  # Example — PRs you authored that have changes requested:
+  # - mode: "url"
+  #   name: "My PRs - Changes Requested"
+  #   query: "is:pr is:open author:@me review:changes_requested"
+  #   polling_rate: 180
+  #
+  # Example — open PRs in a single repo ready for merge (approved, non-draft):
+  # - mode: "url"
+  #   name: "HippoCampus - Ready to Merge"
+  #   query: "is:pr is:open -is:draft review:approved repo:summitnl/HippoCampus"
+  #   polling_rate: 120
+  #
+  # Example — open PRs in a repo that need review (skip drafts + your own PRs):
+  # Equivalent to the GitHub web URL:
+  #   https://github.com/summitnl/HippoCampus/pulls?q=is%3Apr+is%3Aopen+draft%3Afalse+review%3Arequired+-author%3A%40me
+  # - mode: "url"
+  #   name: "HippoCampus - Open for Review"
+  #   query: "repo:summitnl/HippoCampus is:pr is:open draft:false review:required -author:@me"
+  #   polling_rate: 120
   # ---------------------------------------------------------------------------

@@ -1631,6 +1631,210 @@ class ActorWorkflowPoller(WorkflowPoller):
         self._prev_statuses.pop(sk, None)
 
 
+class URLQueryPoller(WorkflowPoller):
+    """Poller that runs an arbitrary GitHub Search API query and renders each PR result.
+
+    Uses GET /search/issues?q=<query> — supports the full GitHub PR filter syntax
+    (see https://docs.github.com/en/search-github/searching-on-github/searching-issues-and-pull-requests).
+    Only pull-request results are rendered; issue-only hits are skipped.
+
+    The row status comes from the review state rather than CI: approved → success icon,
+    changes-requested → failure icon, anything else → unknown icon. This keeps URL
+    sections out of the tray status tree for pending/commented PRs while still
+    surfacing review signal on the row itself.
+    """
+
+    def __init__(self, wid, cfg_entry, config_mgr, event_queue):
+        super().__init__(wid, cfg_entry, config_mgr, event_queue)
+        self.query = (cfg_entry.get("query") or "").strip()
+        self._max_results = int(cfg_entry.get("max_results", 20))
+        self._stale_after = parse_duration(cfg_entry.get("stale_after", "5m"))
+        self._last_seen: dict[str, datetime] = {}
+        # Caches keyed by (owner, repo, pr_num) — URL queries span repos
+        self._pr_cache: dict[tuple[str, str, int], dict] = {}
+        self._review_cache: dict[tuple[str, str, int], tuple[Optional[str], float]] = {}
+        self._review_cache_ttl: float = 120.0
+        self._staleness_thresholds = PRWorkflowPoller._parse_staleness(config_mgr.get())
+
+    def _poll(self):
+        cfg = self.config_mgr.get()
+        token = cfg.get("github_token", "")
+
+        if not self.query:
+            self._emit_error("No 'query' configured for URL mode")
+            return
+        if not token:
+            self._emit_error("URL mode requires a GitHub token")
+            return
+
+        query = self.query
+        if "@me" in query:
+            try:
+                username = fetch_github_username(token, session=self._session)
+            except Exception as exc:
+                self._emit_error(f"Cannot resolve @me: {exc}")
+                return
+            if not username:
+                self._emit_error("Cannot resolve @me — no user")
+                return
+            query = query.replace("@me", username)
+
+        self._staleness_thresholds = PRWorkflowPoller._parse_staleness(cfg)
+
+        try:
+            data = _github_api_get(
+                "https://api.github.com/search/issues",
+                token, self._session,
+                params={
+                    "q": query,
+                    "per_page": self._max_results,
+                    "sort": "updated",
+                    "order": "desc",
+                },
+            )
+        except requests.HTTPError as exc:
+            self._emit_error(f"HTTP {exc.response.status_code}")
+            return
+        except Exception as exc:
+            self._emit_error(str(exc))
+            return
+
+        items = data.get("items", []) or []
+        now = datetime.now()
+        active: set[str] = set()
+
+        for item in items:
+            if not item.get("pull_request"):
+                continue
+            repo_url = item.get("repository_url", "")
+            parts = repo_url.rstrip("/").split("/")
+            if len(parts) < 2:
+                continue
+            owner, repo = parts[-2], parts[-1]
+            pr_num = item.get("number")
+            if not pr_num:
+                continue
+
+            sub_key = f"{owner}/{repo}#{pr_num}"
+            active.add(sub_key)
+            self._last_seen[sub_key] = now
+
+            pr_detail     = self._fetch_pr_detail(owner, repo, pr_num, token)
+            review_status = self._fetch_review_status(owner, repo, pr_num, token)
+
+            row_status = ST_UNKNOWN
+            if review_status == "approved":
+                row_status = ST_SUCCESS
+            elif review_status == "changes_requested":
+                row_status = ST_FAILURE
+
+            head_branch = (pr_detail or {}).get("head_ref", "")
+
+            state = WorkflowState(
+                name=f"{owner}/{repo}",
+                url=item.get("html_url", ""),
+                branch=head_branch or None,
+                head_branch=head_branch or None,
+            )
+            state.last_check    = now
+            state.status        = row_status
+            state.pr_number     = pr_num
+            state.pr_title      = item.get("title") or None
+            state.pr_url        = item.get("html_url", "")
+            state.pr_target     = (pr_detail or {}).get("base_ref", "")
+            state.is_draft      = (pr_detail or {}).get("draft", bool(item.get("draft", False)))
+            state.review_status = review_status
+
+            updated_at_str = item.get("updated_at", "")
+            if updated_at_str:
+                state.pr_updated_at = updated_at_str
+                try:
+                    updated_dt = datetime.fromisoformat(updated_at_str.replace("Z", "+00:00"))
+                    age_secs = (datetime.now(updated_dt.tzinfo) - updated_dt).total_seconds()
+                    for threshold_secs, level in self._staleness_thresholds:
+                        if age_secs >= threshold_secs:
+                            state.staleness_level = level
+                            break
+                except Exception:
+                    pass
+
+            if head_branch:
+                prefix, short = parse_branch_prefix(head_branch)
+                state.branch_prefix = prefix
+                state.branch_short  = short
+                state.jira_key      = extract_jira_key(head_branch)
+
+            self.event_queue.put(StatusEvent(self.wid, state, sub_key=sub_key))
+
+        for sk in list(self._last_seen.keys()):
+            if sk in active:
+                continue
+            elapsed = (now - self._last_seen[sk]).total_seconds()
+            if elapsed >= self._stale_after:
+                self._remove_sub_key(sk)
+
+    def _fetch_pr_detail(self, owner: str, repo: str, pr_num: int, token: str) -> Optional[dict]:
+        key = (owner, repo, pr_num)
+        try:
+            data = _github_api_get(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}",
+                token, self._session,
+            )
+        except Exception:
+            return self._pr_cache.get(key)
+        detail = {
+            "draft":    data.get("draft", False),
+            "base_ref": data.get("base", {}).get("ref", ""),
+            "head_ref": data.get("head", {}).get("ref", ""),
+        }
+        self._pr_cache[key] = detail
+        return detail
+
+    def _fetch_review_status(self, owner: str, repo: str, pr_num: int, token: str) -> Optional[str]:
+        key = (owner, repo, pr_num)
+        cached = self._review_cache.get(key)
+        if cached is not None:
+            status, fetch_time = cached
+            if time.monotonic() - fetch_time < self._review_cache_ttl:
+                return status
+        try:
+            reviews = _github_api_get(
+                f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/reviews",
+                token, self._session,
+            )
+            latest: dict[str, str] = {}
+            has_comments = False
+            for r in reviews:
+                user = r.get("user", {}).get("login", "")
+                rstate = r.get("state", "")
+                if rstate in ("APPROVED", "CHANGES_REQUESTED"):
+                    latest[user] = rstate
+                elif rstate == "COMMENTED":
+                    has_comments = True
+            if not latest:
+                result = "commented" if has_comments else "pending"
+            elif "CHANGES_REQUESTED" in latest.values():
+                result = "changes_requested"
+            else:
+                result = "approved"
+            self._review_cache[key] = (result, time.monotonic())
+            return result
+        except Exception:
+            return cached[0] if cached else None
+
+    def _remove_sub_key(self, sk: str):
+        super()._remove_sub_key(sk)
+        self._last_seen.pop(sk, None)
+        try:
+            owner_repo, pr_str = sk.split("#")
+            owner, repo = owner_repo.split("/")
+            pr_num = int(pr_str)
+            self._pr_cache.pop((owner, repo, pr_num), None)
+            self._review_cache.pop((owner, repo, pr_num), None)
+        except (ValueError, IndexError):
+            pass
+
+
 # ---------------------------------------------------------------------------
 # Icon creation helpers — Lucide-inspired, rendered with PIL
 # ---------------------------------------------------------------------------
@@ -3686,10 +3890,15 @@ class MainWindow(QMainWindow):
         workflows = cfg.get("workflows") or []
 
         branch_container = None
+        _DEFAULT_SECTION_TITLES = {
+            "pr":    "PR Workflows",
+            "actor": "My Runs",
+            "url":   "URL Search",
+        }
         for wid, entry in enumerate(workflows):
             mode = entry.get("mode", "branch")
-            if mode in ("pr", "actor"):
-                name = entry.get("name") or entry.get("url", "PR Workflows" if mode == "pr" else "My Runs")
+            if mode in ("pr", "actor", "url"):
+                name = entry.get("name") or entry.get("url") or _DEFAULT_SECTION_TITLES.get(mode, "Section")
                 container = self._create_section(name)
             else:
                 if branch_container is None:
@@ -3721,6 +3930,8 @@ class MainWindow(QMainWindow):
             poller = PRWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
         elif mode == "actor":
             poller = ActorWorkflowPoller(wid, entry, self._config_mgr, self._event_queue)
+        elif mode == "url":
+            poller = URLQueryPoller(wid, entry, self._config_mgr, self._event_queue)
         else:
             branch = entry.get("branch") or url_branch
             name = entry.get("name") or wf_file or url
