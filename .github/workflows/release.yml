@@ -37,7 +37,13 @@ jobs:
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             echo "No changes since last release ($SHORT)"
           else
-            TAG="v$(date -u +%Y.%m.%d)"
+            BASE="v$(date -u +%Y.%m.%d)"
+            TAG="$BASE"
+            N=2
+            while gh release view "$TAG" >/dev/null 2>&1; do
+              TAG="${BASE}.${N}"
+              N=$((N + 1))
+            done
             echo "should_build=true" >> "$GITHUB_OUTPUT"
             echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
@@ -143,14 +149,6 @@ jobs:
             BODY="No changelog entry for this release."
           fi
           echo "$BODY" > release_notes.md
-
-      - name: Delete existing release for today's tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          TAG="${{ needs.check.outputs.version_tag }}"
-          gh release delete "$TAG" --yes 2>/dev/null || true
-          git push --delete origin "$TAG" 2>/dev/null || true
 
       - name: Create release
         env:
