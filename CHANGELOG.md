@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-04-22
+
+- **Fix auto-update crash & hang** — auto-update swapped the running `.exe` in place (rename to `.old`, move `.update` over the original path) while the process was still alive. PyInstaller's onefile bootloader lazy-loads modules by re-reading `sys.executable` at runtime, so any import after the swap read from the new binary using the old archive offsets and crashed with `zlib.error: Error -3 while decompressing data: incorrect header check` (seen in v2026.04.18). The update dialog would also hang because `sys.exit(0)` doesn't reliably terminate a running Qt event loop. Now `_apply_release_update()` only downloads to `.update` without touching the running exe, and `restart_app()` writes a detached helper script (`.bat` on Windows, `.sh` on Linux) to temp that waits for the PID to exit, swaps the files with retry, launches the new exe, and self-deletes. Current process terminates via `os._exit(0)` to bypass Qt. No extra release asset required — the helper script is generated on the fly.
+
 ### 2026-04-21
 
 - **Fix foreign PR leak (round 2)** — previous fix relied on GitHub's `?creator={username}` filter to build the allowlist, but the filter turned out to be loose on the API side: it returned PRs whose `user.login` was someone else entirely (reproduced in summitnl/HippoCampus: `creator=wpaap` returned PR #4134 authored by `boukeversteegh`). Now `_fetch_user_open_prs` re-checks each PR's `user.login` against the authenticated username client-side before adding to `user_pr_numbers`, so the downstream filter drops foreign PRs reliably.

@@ -30,6 +30,7 @@ from urllib.parse import urlparse, parse_qs, unquote
 import stat
 import base64
 import io
+import tempfile
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
     QVBoxLayout, QHBoxLayout, QFrame, QScrollArea, QCheckBox, QMenu,
@@ -2383,6 +2384,8 @@ class UpdateChecker:
 
     # Populated by _check_release() for use in apply_update() and the dialog.
     _release_data: Optional[dict] = None
+    # Populated by _apply_release_update() once new binary is downloaded.
+    _update_path: Optional[Path] = None
 
     @staticmethod
     def check() -> Optional[str]:
@@ -2434,7 +2437,13 @@ class UpdateChecker:
 
     @staticmethod
     def _apply_release_update() -> tuple[bool, str]:
-        """Download the latest release binary and replace the running executable."""
+        """Download the latest release binary to a staging path.
+
+        Does NOT swap the running executable — swap happens in a detached
+        helper script launched by restart_app() after the current process
+        has exited. Swapping in-place while PyInstaller is still lazy-loading
+        modules corrupts archive reads (zlib "incorrect header check").
+        """
         try:
             data = UpdateChecker._release_data
             if not data:
@@ -2474,31 +2483,94 @@ class UpdateChecker:
                     f"Download size mismatch (got {bytes_written}, expected {expected_size})"
                 )
 
-            if IS_WINDOWS:
-                old_path = current_exe.with_suffix(".old")
-                try:
-                    old_path.unlink(missing_ok=True)
-                except OSError:
-                    pass
-                current_exe.rename(old_path)
-                tmp_path.rename(current_exe)
-            else:
+            if not IS_WINDOWS:
                 tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IEXEC)
-                tmp_path.rename(current_exe)
 
+            UpdateChecker._update_path = tmp_path
             UpdateChecker._release_data = None
-            return True, "Update complete"
+            return True, "Update downloaded"
         except Exception as exc:
             return False, str(exc)
 
     @staticmethod
     def restart_app():
-        """Re-launch the app and exit the current process."""
+        """Exit the current process and let a detached helper swap + relaunch.
+
+        When an update was downloaded, spawn a platform-specific script that
+        waits for our PID to disappear, swaps the binary, and launches the
+        new exe. Uses os._exit to bypass any Qt event-loop interference.
+        """
+        update_path = UpdateChecker._update_path
+        staged = update_path is not None and Path(update_path).exists()
+
+        if not staged:
+            # No update to apply — fall back to a plain relaunch.
+            if IS_WINDOWS:
+                subprocess.Popen([sys.executable] + sys.argv[1:], close_fds=True)
+            else:
+                os.execv(sys.executable, [sys.executable] + sys.argv)
+            os._exit(0)
+
+        current_exe = Path(sys.executable)
+        old_path = current_exe.with_suffix(".old")
+        pid = os.getpid()
+        tmp_dir = Path(tempfile.gettempdir())
+
         if IS_WINDOWS:
-            subprocess.Popen([sys.executable] + sys.argv[1:])
-            sys.exit(0)
+            script = tmp_dir / f"am_update_{pid}.bat"
+            script.write_text(
+                "@echo off\r\n"
+                ":waitpid\r\n"
+                f'tasklist /FI "PID eq {pid}" 2>nul | findstr /C:"{pid}" >nul\r\n'
+                "if %errorlevel% EQU 0 (\r\n"
+                "  ping -n 2 127.0.0.1 >nul\r\n"
+                "  goto waitpid\r\n"
+                ")\r\n"
+                "set /a tries=0\r\n"
+                ":tryrename\r\n"
+                f'move /y "{current_exe}" "{old_path}" >nul 2>&1\r\n'
+                "if errorlevel 1 (\r\n"
+                "  ping -n 2 127.0.0.1 >nul\r\n"
+                "  set /a tries+=1\r\n"
+                "  if %tries% LSS 10 goto tryrename\r\n"
+                "  exit /b 1\r\n"
+                ")\r\n"
+                f'move /y "{update_path}" "{current_exe}" >nul 2>&1\r\n'
+                f'start "" "{current_exe}"\r\n'
+                '(goto) 2>nul & del "%~f0"\r\n',
+                encoding="ascii",
+            )
+            DETACHED_PROCESS = 0x00000008
+            CREATE_NO_WINDOW = 0x08000000
+            subprocess.Popen(
+                ["cmd", "/c", str(script)],
+                creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+                close_fds=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
         else:
-            os.execv(sys.executable, [sys.executable] + sys.argv)
+            script = tmp_dir / f"am_update_{pid}.sh"
+            script.write_text(
+                "#!/bin/sh\n"
+                f"while kill -0 {pid} 2>/dev/null; do sleep 0.5; done\n"
+                f'mv -f "{current_exe}" "{old_path}"\n'
+                f'mv -f "{update_path}" "{current_exe}"\n'
+                f'chmod +x "{current_exe}"\n'
+                f'nohup "{current_exe}" >/dev/null 2>&1 &\n'
+                'rm -- "$0"\n'
+            )
+            script.chmod(0o755)
+            subprocess.Popen(
+                ["/bin/sh", str(script)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+
+        os._exit(0)
 
 
 class UpdateDialog(QDialog):
