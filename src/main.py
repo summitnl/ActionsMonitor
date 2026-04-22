@@ -34,7 +34,8 @@ import tempfile
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
     QVBoxLayout, QHBoxLayout, QFrame, QScrollArea, QCheckBox, QMenu,
-    QDialog, QSystemTrayIcon, QMessageBox, QPushButton, QSizePolicy)
+    QDialog, QSystemTrayIcon, QMessageBox, QPushButton, QSizePolicy,
+    QGraphicsOpacityEffect)
 from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QEvent
 from PySide6.QtGui import QPixmap, QImage, QIcon, QCursor, QFont, QColor, QMouseEvent
 
@@ -2017,6 +2018,7 @@ class WorkflowRow(QWidget):
         self._jira_base_url = jira_base_url
         self._snooze_cb = snooze_cb
         self._snoozed = False
+        self._icon_opacity: Optional[QGraphicsOpacityEffect] = None
         self._bg = BG_ROW_ALT if alt else BG_ROW
         self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.customContextMenuRequested.connect(self._on_right_click)
@@ -2168,14 +2170,19 @@ class WorkflowRow(QWidget):
 
     def set_snoozed(self, snoozed: bool):
         self._snoozed = snoozed
-        dimmed = "#78716C"
+        dim_text = "#57534E"
+        dim_muted = "#44403C"
         if snoozed:
-            self._accent.setStyleSheet(f"background-color: #57534E;")
-            self._info_lbl.setStyleSheet(f"color: {dimmed}; font-size: 11px;")
-            self._name_lbl.setStyleSheet(f"color: {dimmed}; font-size: 12px;")
-            self._poll_lbl.setStyleSheet(f"color: {dimmed}; font-size: 11px;")
-            self._branch_lbl.setStyleSheet(f"color: {dimmed}; font-size: 11px;")
-            self._pr_title_lbl.setStyleSheet(f"color: {dimmed}; font-size: 12px;")
+            self._accent.setStyleSheet(f"background-color: #3F3B38;")
+            self._info_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
+            self._name_lbl.setStyleSheet(f"color: {dim_text}; font-size: 12px;")
+            self._poll_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
+            self._branch_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
+            self._pr_title_lbl.setStyleSheet(f"color: {dim_text}; font-size: 12px;")
+            if self._icon_opacity is None:
+                self._icon_opacity = QGraphicsOpacityEffect(self._icon_lbl)
+                self._icon_lbl.setGraphicsEffect(self._icon_opacity)
+            self._icon_opacity.setOpacity(0.35)
         else:
             self._accent.setStyleSheet(
                 f"background-color: {COLOUR.get(self._state.status, COLOUR[ST_UNKNOWN])};")
@@ -2184,7 +2191,22 @@ class WorkflowRow(QWidget):
             self._poll_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
             self._branch_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
             self._pr_title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+            if self._icon_opacity is not None:
+                self._icon_opacity.setOpacity(1.0)
+        self._restyle_static_badges()
         self._update_labels()
+
+    def _badge_css(self, bg: str, fg: str, bold: bool = False) -> str:
+        if self._snoozed:
+            bg, fg = "#2C2825", "#57534E"
+        weight = "bold" if bold else "normal"
+        return (f"background-color: {bg}; color: {fg}; font-size: 9px; "
+                f"font-weight: {weight}; padding: 0px 3px; border-radius: 2px;")
+
+    def _restyle_static_badges(self):
+        self._prefix_lbl.setStyleSheet(self._badge_css("#3D3530", "#FBBF24"))
+        self._draft_lbl.setStyleSheet(self._badge_css("#92400E", "#FEF3C7", bold=True))
+        self._jira_lbl.setStyleSheet(self._badge_css("#302830", "#A78BFA"))
 
     def _open_jira(self):
         if self._jira_base_url and self._state.jira_key:
@@ -2259,9 +2281,7 @@ class WorkflowRow(QWidget):
                 text, bg_col, fg_col = _REVIEW_BADGE_CFG.get(
                     s.review_status, ("REVIEW PENDING", "#3D3530", "#FBBF24"))
                 self._review_lbl.setText(text)
-                self._review_lbl.setStyleSheet(
-                    f"background-color: {bg_col}; color: {fg_col}; font-size: 9px; "
-                    f"padding: 0px 3px; border-radius: 2px;")
+                self._review_lbl.setStyleSheet(self._badge_css(bg_col, fg_col))
                 self._review_lbl.setVisible(True)
                 has_badges = True
             else:
@@ -2271,9 +2291,7 @@ class WorkflowRow(QWidget):
                 bg_col, fg_col = _STALENESS_BADGE_CFG.get(s.staleness_level, ("#3D3520", "#EAB308"))
                 age = _format_age(s.pr_updated_at)
                 self._stale_lbl.setText(f"STALE {age}" if age else "STALE")
-                self._stale_lbl.setStyleSheet(
-                    f"background-color: {bg_col}; color: {fg_col}; font-size: 9px; "
-                    f"font-weight: bold; padding: 0px 3px; border-radius: 2px;")
+                self._stale_lbl.setStyleSheet(self._badge_css(bg_col, fg_col, bold=True))
                 self._stale_lbl.setVisible(True)
                 has_badges = True
             else:

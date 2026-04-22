@@ -2,6 +2,7 @@
 
 ### 2026-04-22
 
+- **Deeper snoozed-row dim** — snoozed rows now fade harder so they recede into the background. Labels drop to stone-700/800 (`#57534E`/`#44403C`) from stone-500, accent bar drops to `#3F3B38`, status icon gets 35% opacity via `QGraphicsOpacityEffect`, and all badges (prefix, DRAFT, Jira, review, STALE) override to a uniform muted grey (`#2C2825`/`#57534E`) — amber/yellow/purple/red tones fully fade. SNOOZED badge keeps its normal grey so the state stays visible at a glance.
 - **Fix auto-update crash & hang** — auto-update swapped the running `.exe` in place (rename to `.old`, move `.update` over the original path) while the process was still alive. PyInstaller's onefile bootloader lazy-loads modules by re-reading `sys.executable` at runtime, so any import after the swap read from the new binary using the old archive offsets and crashed with `zlib.error: Error -3 while decompressing data: incorrect header check` (seen in v2026.04.18). The update dialog would also hang because `sys.exit(0)` doesn't reliably terminate a running Qt event loop. Now `_apply_release_update()` only downloads to `.update` without touching the running exe, and `restart_app()` writes a detached helper script (`.bat` on Windows, `.sh` on Linux) to temp that waits for the PID to exit, swaps the files with retry, launches the new exe, and self-deletes. Current process terminates via `os._exit(0)` to bypass Qt. No extra release asset required — the helper script is generated on the fly.
 
 ### 2026-04-21
