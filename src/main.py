@@ -4156,10 +4156,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     @staticmethod
     def _load_state() -> dict:
-        if STATE_FILE.exists():
+        if not STATE_FILE.exists():
+            return {}
+        try:
             with open(STATE_FILE, encoding="utf-8") as fh:
-                return json.load(fh)
-        return {}
+                content = fh.read().strip()
+            return json.loads(content) if content else {}
+        except (json.JSONDecodeError, OSError):
+            return {}
 
     @staticmethod
     def _write_state(state: dict):
