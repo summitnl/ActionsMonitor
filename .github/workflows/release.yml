@@ -11,7 +11,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
-      version_tag: ${{ steps.check.outputs.version_tag }}
       short_sha: ${{ steps.check.outputs.short_sha }}
     steps:
       - uses: actions/checkout@v4
@@ -37,17 +36,9 @@ jobs:
             echo "should_build=false" >> "$GITHUB_OUTPUT"
             echo "No changes since last release ($SHORT)"
           else
-            BASE="v$(date -u +%Y.%m.%d)"
-            TAG="$BASE"
-            N=2
-            while gh release view "$TAG" >/dev/null 2>&1; do
-              TAG="${BASE}.${N}"
-              N=$((N + 1))
-            done
             echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
             echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
-            echo "Changes detected — will build $TAG ($SHORT)"
+            echo "Changes detected ($SHORT)"
           fi
 
   build-windows:
@@ -127,6 +118,8 @@ jobs:
     needs: [check, build-windows, build-linux]
     if: needs.check.outputs.should_build == 'true'
     runs-on: ubuntu-latest
+    outputs:
+      version_tag: ${{ steps.create.outputs.version_tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -151,20 +144,46 @@ jobs:
           echo "$BODY" > release_notes.md
 
       - name: Create release
+        id: create
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ needs.check.outputs.version_tag }}"
-          gh release create "$TAG" \
-            --title "Actions Monitor $TAG" \
-            --notes-file release_notes.md \
-            --target "${{ github.sha }}" \
-            artifacts/ActionsMonitor.exe \
-            artifacts/ActionsMonitor-linux
+          # Tag strategy: v<date> first, then v<date>.2, v<date>.3, etc.
+          # GitHub's immutable-releases feature permanently reserves tag
+          # names (even after the release is deleted), and there's no API
+          # to query the reservation list — so retry on-failure instead of
+          # pre-checking.
+          BASE="v$(date -u +%Y.%m.%d)"
+          TAG="$BASE"
+          N=2
+          for attempt in $(seq 1 20); do
+            OUT=$(mktemp)
+            if gh release create "$TAG" \
+                 --title "Actions Monitor $TAG" \
+                 --notes-file release_notes.md \
+                 --target "${{ github.sha }}" \
+                 artifacts/ActionsMonitor.exe \
+                 artifacts/ActionsMonitor-linux > "$OUT" 2>&1; then
+              cat "$OUT"
+              echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
+              echo "Released as $TAG"
+              exit 0
+            fi
+            cat "$OUT"
+            if grep -qE "immutable release|Cannot create ref|already_exists|already exists" "$OUT"; then
+              TAG="${BASE}.${N}"
+              N=$((N + 1))
+              echo "Tag reserved, retrying as $TAG"
+              continue
+            fi
+            echo "Release creation failed for unrecoverable reason"
+            exit 1
+          done
+          echo "Exhausted tag-suffix attempts"
+          exit 1
 
   update-scoop:
-    needs: [check, release]
-    if: needs.check.outputs.should_build == 'true'
+    needs: [release]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -178,7 +197,7 @@ jobs:
 
       - name: Refresh manifest
         run: |
-          TAG="${{ needs.check.outputs.version_tag }}"
+          TAG="${{ needs.release.outputs.version_tag }}"
           VERSION="${TAG#v}"
           HASH=$(sha256sum artifacts/ActionsMonitor.exe | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
           URL="https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
@@ -193,19 +212,18 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add bucket/actionsmonitor.json
           if ! git diff --cached --quiet; then
-            git commit -m "chore: bump scoop manifest to ${{ needs.check.outputs.version_tag }}"
+            git commit -m "chore: bump scoop manifest to ${{ needs.release.outputs.version_tag }}"
             git push
           fi
 
   update-winget:
-    needs: [check, release]
-    if: needs.check.outputs.should_build == 'true'
+    needs: [release]
     runs-on: windows-latest
     steps:
       - name: Submit winget update
         shell: pwsh
         run: |
-          $TAG = "${{ needs.check.outputs.version_tag }}"
+          $TAG = "${{ needs.release.outputs.version_tag }}"
           $VERSION = $TAG.TrimStart("v")
           $URL = "https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
           Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
