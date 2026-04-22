@@ -2995,6 +2995,29 @@ class StartupManager:
 # ---------------------------------------------------------------------------
 # Update checker
 # ---------------------------------------------------------------------------
+def _detect_install_source() -> str:
+    """Return 'scoop', 'winget', or 'direct' based on the exe location.
+
+    Package-manager installs should upgrade via the manager, not via the
+    in-app updater — writing into scoop/winget-managed dirs causes metadata
+    drift and the next manager-driven update overwrites the swap.
+    """
+    if not getattr(sys, "frozen", False):
+        return "direct"
+    exe = str(Path(sys.executable)).replace("/", "\\").lower()
+    if "\\scoop\\apps\\" in exe:
+        return "scoop"
+    if "\\winget\\packages\\" in exe:
+        return "winget"
+    return "direct"
+
+
+_MANAGED_UPGRADE_CMD = {
+    "scoop": "scoop update actionsmonitor",
+    "winget": "winget upgrade Summit.ActionsMonitor",
+}
+
+
 class UpdateChecker:
     REPO_URL = "https://github.com/summitnl/ActionsMonitor"
     RELEASES_API = "https://api.github.com/repos/summitnl/ActionsMonitor/releases/latest"
@@ -3195,7 +3218,10 @@ class UpdateDialog(QDialog):
     def __init__(self, commit_hash: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"{APP_NAME} — Update Available")
-        self.setFixedSize(420, 240)
+
+        source = _detect_install_source()
+        managed_cmd = _MANAGED_UPGRADE_CMD.get(source)
+        self.setFixedSize(420, 280 if managed_cmd else 240)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -3214,6 +3240,21 @@ class UpdateDialog(QDialog):
         link.setStyleSheet(f"color: {FG_LINK}; font-size: 12px; text-decoration: underline;")
         layout.addWidget(link)
 
+        if managed_cmd:
+            mgr_label = {"scoop": "Scoop", "winget": "winget"}[source]
+            instr = QLabel(f"Installed via {mgr_label}. Run this command to upgrade:")
+            instr.setStyleSheet(f"color: {FG_MUTED}; font-size: 12px; margin-top: 6px;")
+            layout.addWidget(instr)
+
+            cmd_lbl = QLabel(managed_cmd)
+            cmd_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            cmd_lbl.setStyleSheet(
+                f"color: {FG_TEXT}; background-color: {BG_ROW}; "
+                f"font-family: Consolas, 'Courier New', monospace; font-size: 12px; "
+                f"padding: 6px 8px; border-radius: 3px;"
+            )
+            layout.addWidget(cmd_lbl)
+
         self._status_lbl = QLabel("")
         self._status_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 12px;")
         layout.addWidget(self._status_lbl)
@@ -3221,17 +3262,33 @@ class UpdateDialog(QDialog):
         layout.addStretch()
 
         btn_layout = QHBoxLayout()
-        self._update_btn = QPushButton("Update")
-        self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._update_btn.clicked.connect(self._do_update)
-        btn_layout.addWidget(self._update_btn)
+        if managed_cmd:
+            self._copy_btn = QPushButton("Copy command")
+            self._copy_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._copy_btn.clicked.connect(lambda: self._copy_cmd(managed_cmd))
+            btn_layout.addWidget(self._copy_btn)
 
-        self._skip_btn = QPushButton("Skip")
-        self._skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._skip_btn.clicked.connect(self.reject)
-        btn_layout.addWidget(self._skip_btn)
+            self._close_btn = QPushButton("Close")
+            self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._close_btn.clicked.connect(self.reject)
+            btn_layout.addWidget(self._close_btn)
+        else:
+            self._update_btn = QPushButton("Update")
+            self._update_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._update_btn.clicked.connect(self._do_update)
+            btn_layout.addWidget(self._update_btn)
+
+            self._skip_btn = QPushButton("Skip")
+            self._skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._skip_btn.clicked.connect(self.reject)
+            btn_layout.addWidget(self._skip_btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
+
+    def _copy_cmd(self, cmd: str):
+        QApplication.clipboard().setText(cmd)
+        self._status_lbl.setText("Copied to clipboard.")
+        self._status_lbl.setStyleSheet(f"color: {COLOUR[ST_SUCCESS]}; font-size: 12px;")
 
     def _do_update(self):
         self._update_btn.setEnabled(False)
