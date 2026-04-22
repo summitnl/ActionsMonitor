@@ -9,6 +9,10 @@
     "shortcuts": [
         ["ActionsMonitor.exe", "Actions Monitor"]
     ],
+    "pre_install": [
+        "if (-not (Test-Path \"$persist_dir\\config.yaml\")) { New-Item \"$persist_dir\\config.yaml\" -ItemType File -Force | Out-Null }",
+        "if (-not (Test-Path \"$persist_dir\\state.json\")) { New-Item \"$persist_dir\\state.json\" -ItemType File -Force | Out-Null }"
+    ],
     "persist": [
         "config.yaml",
         "state.json"
