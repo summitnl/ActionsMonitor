@@ -17,17 +17,34 @@ This project is licensed under the [Summit Free Use License](LICENSE). All copie
 - **Windows** 10 / 11
 - **Linux** with GTK3 (Ubuntu 22.04+, Fedora, etc.) — tray icon requires `gir1.2-ayatanaappindicator3-0.1`
 
-## Releases / Download
-
-Download the latest build from [GitHub Releases](https://github.com/summitnl/ActionsMonitor/releases/latest).
+## Install
 
 ![Application window](docs/application.png)
+
+### Windows — winget (recommended)
+
+```powershell
+winget install Summit.ActionsMonitor
+```
+
+### Windows — Scoop
+
+```powershell
+scoop bucket add summit https://github.com/summitnl/ActionsMonitor
+scoop install actionsmonitor
+```
+
+### Direct download
+
+Grab `ActionsMonitor.exe` (Windows) or `ActionsMonitor-linux` from [GitHub Releases](https://github.com/summitnl/ActionsMonitor/releases/latest).
+
+> **Heads up:** the binary is unsigned, so the browser flags the `.exe` as unverified and Windows marks it blocked. Right-click the downloaded file → **Properties** → tick **Unblock** → **OK** before running. Prefer winget or Scoop to skip this step.
 
 ## Getting started
 
 ### Windows
 
-1. Run `ActionsMonitor.exe` — on first launch it creates `config.yaml` from the template
+1. Launch Actions Monitor — on first run it creates `config.yaml` from the template
 2. Add your GitHub token and workflows (see [Configuration](#configuration) below)
 3. The app hot-reloads the config, no restart needed
 
@@ -164,35 +181,12 @@ Binary builds (the `.exe` / Linux binary) check GitHub Releases shortly after st
 
 Running from source does not auto-update — use `git pull` manually.
 
-## Development setup
-
-If you want to run from source instead of the binary:
-
-```bash
-# Windows
-src\dev-install.bat
-
-# Linux
-pip3 install -r src/requirements.txt
-sudo apt-get install -y python3-tk gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
-python3 src/main.py
-```
-
-### Building from source
-
-Requires Python 3.10+ with dependencies installed (`pip install -r src/requirements.txt`).
-
-```bash
-# Windows — produces ActionsMonitor.exe
-src\build.bat
-
-# Linux — produces ActionsMonitor-linux
-pyinstaller --onefile --name ActionsMonitor-linux --add-data "config.template.yaml:." src/main.py
-cp dist/ActionsMonitor-linux .
-```
-
 ## Uninstall
 
-Disable **Start with Windows** in the app footer, then delete the folder.
+- **winget:** `winget uninstall Summit.ActionsMonitor`
+- **Scoop:** `scoop uninstall actionsmonitor`
+- **Direct download:** disable **Start with Windows** in the app footer, then delete the folder.
 
-If you used the development setup, run `src\dev-uninstall.bat` to also remove the startup registry entry and Python packages.
+## Contributing
+
+Running from source, building binaries, and the release pipeline are documented in [DEVGUIDE.md](DEVGUIDE.md).

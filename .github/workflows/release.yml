@@ -163,3 +163,56 @@ jobs:
             --target "${{ github.sha }}" \
             artifacts/ActionsMonitor.exe \
             artifacts/ActionsMonitor-linux
+
+  update-scoop:
+    needs: [check, release]
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-binary
+          path: artifacts/
+
+      - name: Refresh manifest
+        run: |
+          TAG="${{ needs.check.outputs.version_tag }}"
+          VERSION="${TAG#v}"
+          HASH=$(sha256sum artifacts/ActionsMonitor.exe | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
+          URL="https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
+          jq --arg v "$VERSION" --arg h "$HASH" --arg u "$URL" \
+             '.version=$v | .hash=$h | .url=$u' bucket/actionsmonitor.json \
+             > bucket/actionsmonitor.json.tmp
+          mv bucket/actionsmonitor.json.tmp bucket/actionsmonitor.json
+
+      - name: Commit manifest bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add bucket/actionsmonitor.json
+          if ! git diff --cached --quiet; then
+            git commit -m "chore: bump scoop manifest to ${{ needs.check.outputs.version_tag }}"
+            git push
+          fi
+
+  update-winget:
+    needs: [check, release]
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: windows-latest
+    steps:
+      - name: Submit winget update
+        shell: pwsh
+        run: |
+          $TAG = "${{ needs.check.outputs.version_tag }}"
+          $VERSION = $TAG.TrimStart("v")
+          $URL = "https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
+          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
+          ./wingetcreate.exe update Summit.ActionsMonitor `
+              --version $VERSION `
+              --urls $URL `
+              --submit `
+              --token "${{ secrets.WINGET_PAT }}"

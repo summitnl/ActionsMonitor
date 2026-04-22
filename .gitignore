@@ -27,3 +27,6 @@ dist/
 # Built binaries (produced by CI, distributed via GitHub Releases)
 ActionsMonitor.exe
 ActionsMonitor-linux
+
+# wingetcreate local output — belongs in microsoft/winget-pkgs, not here
+/manifests/
