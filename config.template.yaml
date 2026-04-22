@@ -130,7 +130,7 @@ workflows:
   #       enabled: false
   #
   # Example with a real URL (branch mode, acceptance branch):
-  # - url: https://github.com/summitnl/HippoCampus/actions/workflows/acceptance-merge.yml?query=branch%3Aacceptance
+  # - url: https://github.com/your-org/your-repo/actions/workflows/acceptance-merge.yml?query=branch%3Aacceptance
   #   name: "Acceptance Merge"
   #   polling_rate: 30
 
@@ -148,15 +148,15 @@ workflows:
   #     - e2e-tests.yml           # (failure > running > queued > success)
   #
   # Example with a real URL (PR mode):
-  # - url: https://github.com/summitnl/HippoCampus/actions/workflows/acceptance-pr.yml
+  # - url: https://github.com/your-org/your-repo/actions/workflows/acceptance-pr.yml
   #   name: "Acceptance/PR"
   #   mode: "pr"
   #   polling_rate: 45
   #   max_prs: 5
   #   pr_stale_after: "5m"
   #   extra_workflows:
-  #     - acceptance-pr-e2e-integrationtests.yml
-  #     - acceptance-pr-lint.yml
+  #     - integration-tests.yml
+  #     - lint.yml
 
   # ---------------------------------------------------------------------------
   # Example: Actor mode — all your recent workflow runs across a repo
@@ -171,7 +171,7 @@ workflows:
   #
 
   # Example with a real URL (actor mode, failed only):
-  # - url: https://github.com/summitnl/HippoCampus/actions?query=actor%3Ausername
+  # - url: https://github.com/your-org/your-repo/actions?query=actor%3Ausername
   #   name: "My Failed Runs"
   #   mode: "actor"
   #   filter: "failed"
@@ -195,8 +195,8 @@ workflows:
   #   review:approved / review:changes_requested
   #   author:@me                         # PRs you authored
   #   assignee:@me                       # PRs assigned to you
-  #   user:summitnl                      # limit to an org
-  #   repo:summitnl/HippoCampus          # limit to one repo
+  #   user:your-org                      # limit to an org
+  #   repo:your-org/your-repo            # limit to one repo
   #   label:"priority:high"              # by label
   #   updated:>2026-01-01                # activity window
   #
@@ -224,15 +224,15 @@ workflows:
   #
   # Example — open PRs in a single repo ready for merge (approved, non-draft):
   # - mode: "url"
-  #   name: "HippoCampus - Ready to Merge"
-  #   query: "is:pr is:open -is:draft review:approved repo:summitnl/HippoCampus"
+  #   name: "your-repo - Ready to Merge"
+  #   query: "is:pr is:open -is:draft review:approved repo:your-org/your-repo"
   #   polling_rate: 120
   #
   # Example — open PRs in a repo that need review (skip drafts + your own PRs):
   # Equivalent to the GitHub web URL:
-  #   https://github.com/summitnl/HippoCampus/pulls?q=is%3Apr+is%3Aopen+draft%3Afalse+review%3Arequired+-author%3A%40me
+  #   https://github.com/your-org/your-repo/pulls?q=is%3Apr+is%3Aopen+draft%3Afalse+review%3Arequired+-author%3A%40me
   # - mode: "url"
-  #   name: "HippoCampus - Open for Review"
-  #   query: "repo:summitnl/HippoCampus is:pr is:open draft:false review:required -author:@me"
+  #   name: "your-repo - Open for Review"
+  #   query: "repo:your-org/your-repo is:pr is:open draft:false review:required -author:@me"
   #   polling_rate: 120
   # ---------------------------------------------------------------------------
