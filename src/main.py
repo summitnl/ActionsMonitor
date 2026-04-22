@@ -262,6 +262,12 @@ _STALENESS_BADGE_CFG = {
 _snoozed_keys: set[tuple[int, Optional[str]]] = set()
 _snoozed_lock = threading.Lock()
 
+
+def _is_snoozed(wid: int, sub_key: Optional[str]) -> bool:
+    """Thread-safe check whether a (wid, sub_key) row is currently snoozed."""
+    with _snoozed_lock:
+        return (wid, sub_key) in _snoozed_keys
+
 # Colour palette — warm dark theme
 COLOUR = {
     ST_UNKNOWN:   "#A8A29E",  # warm grey (stone-400)
@@ -987,6 +993,10 @@ class WorkflowPoller(threading.Thread):
                 self._stop_evt.wait(min(remaining, 1.0))
 
     def _poll(self):
+        # Skip polling entirely while snoozed — no API calls, no status checks
+        if _is_snoozed(self.wid, None):
+            return
+
         cfg      = self.config_mgr.get()
         token    = cfg.get("github_token", "")
         notif_cfg = cfg.get("notifications", {})
@@ -1278,6 +1288,11 @@ class PRWorkflowPoller(WorkflowPoller):
                 sub_key = f"{branch_name}#{pr_num}" if pr_num is not None else branch_name
                 active_sub_keys.add(sub_key)
                 self._last_seen[sub_key] = now
+
+                # Snoozed rows: skip status checks, review fetches, and notifications.
+                # Row stays in active_sub_keys so it isn't culled as stale.
+                if _is_snoozed(self.wid, sub_key):
+                    continue
 
                 # Determine per-run statuses and pick the aggregate + representative run
                 run_statuses: list[str] = []
@@ -1574,6 +1589,10 @@ class ActorWorkflowPoller(WorkflowPoller):
         for composite_key, run in active_keys.items():
             self._last_seen[composite_key] = now
 
+            # Snoozed rows: skip status resolution and notifications
+            if _is_snoozed(self.wid, composite_key):
+                continue
+
             run_id     = run.get("id")
             api_status = run.get("status")
             conclusion = run.get("conclusion")
@@ -1718,6 +1737,10 @@ class URLQueryPoller(WorkflowPoller):
             sub_key = f"{owner}/{repo}#{pr_num}"
             active.add(sub_key)
             self._last_seen[sub_key] = now
+
+            # Snoozed rows: skip per-PR detail + review fetches and event emission
+            if _is_snoozed(self.wid, sub_key):
+                continue
 
             pr_detail     = self._fetch_pr_detail(owner, repo, pr_num, token)
             review_status = self._fetch_review_status(owner, repo, pr_num, token)
@@ -2049,44 +2072,59 @@ def _make_help_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
     return img.resize((size, size), Image.LANCZOS)
 
 
-# --- Snooze button icon (crescent moon) ---
+# --- Snooze button icon (bell / bell-off) ---
 
 _SNOOZE_ICON_SIZE = 24
 
 
-def _draw_z_glyph(draw: ImageDraw.Draw, x: int, y: int, w: int, h: int,
-                   colour: str, width: int):
-    """Draw a single Z glyph (three strokes: top, diagonal, bottom)."""
-    draw.line([(x, y), (x + w, y)], fill=colour, width=width)
-    draw.line([(x + w, y), (x, y + h)], fill=colour, width=width)
-    draw.line([(x, y + h), (x + w, y + h)], fill=colour, width=width)
+def _draw_bell_glyph(draw: ImageDraw.Draw, hi: int, fg_colour: str):
+    """Draw a filled bell glyph centred in a hi x hi canvas."""
+    cx = hi / 2
+    # Dome (top half of ellipse blended into body)
+    dome_w = hi * 0.48
+    dome_top = hi * 0.20
+    dome_h = hi * 0.50
+    draw.ellipse([cx - dome_w / 2, dome_top,
+                  cx + dome_w / 2, dome_top + dome_h], fill=fg_colour)
+    # Body: rectangle blending dome into rim
+    body_w = hi * 0.42
+    body_top = dome_top + dome_h * 0.45
+    body_bot = hi * 0.66
+    draw.rectangle([cx - body_w / 2, body_top,
+                    cx + body_w / 2, body_bot], fill=fg_colour)
+    # Flared rim (wider)
+    rim_w = hi * 0.56
+    rim_top = body_bot
+    rim_bot = hi * 0.74
+    draw.rectangle([cx - rim_w / 2, rim_top,
+                    cx + rim_w / 2, rim_bot], fill=fg_colour)
+    # Top pin
+    pin_w = hi * 0.14
+    pin_top = hi * 0.08
+    pin_h = hi * 0.12
+    draw.ellipse([cx - pin_w / 2, pin_top,
+                  cx + pin_w / 2, pin_top + pin_h], fill=fg_colour)
+    # Clapper (small circle below rim)
+    cl_w = hi * 0.16
+    cl_top = hi * 0.78
+    draw.ellipse([cx - cl_w / 2, cl_top,
+                  cx + cl_w / 2, cl_top + cl_w], fill=fg_colour)
 
 
 def _make_snooze_icon(size: int = _SNOOZE_ICON_SIZE, bg_colour: str = "#3D3530",
-                      fg_colour: str = "#A8A29E") -> Image.Image:
-    """Zzz icon on a filled circle background for the snooze button."""
+                      fg_colour: str = "#A8A29E", off: bool = False) -> Image.Image:
+    """Bell icon on a filled circle background. When `off`, adds a diagonal slash."""
     img, draw, hi = _icon_base(size)
-    # Background circle
     pad = int(hi * 0.02)
     draw.ellipse([pad, pad, hi - pad, hi - pad], fill=bg_colour)
-    # Draw three Z letters inside the circle
-    sw = max(2, round(hi / 16 * 1.3))
-    c = fg_colour
-    # Inset for the Z glyphs (inside the circle)
-    inset = int(hi * 0.18)
-    iw = hi - 2 * inset  # usable area
-    # Large Z (bottom-left area)
-    zw, zh = int(iw * 0.50), int(iw * 0.32)
-    zx, zy = inset, inset + int(iw * 0.55)
-    _draw_z_glyph(draw, zx, zy, zw, zh, c, sw)
-    # Medium Z (middle area)
-    zw2, zh2 = int(zw * 0.60), int(zh * 0.60)
-    zx2, zy2 = inset + int(iw * 0.28), inset + int(iw * 0.22)
-    _draw_z_glyph(draw, zx2, zy2, zw2, zh2, c, sw)
-    # Small Z (top-right area)
-    zw3, zh3 = int(zw * 0.35), int(zh * 0.35)
-    zx3, zy3 = inset + int(iw * 0.52), inset + int(iw * 0.02)
-    _draw_z_glyph(draw, zx3, zy3, zw3, zh3, c, sw)
+    _draw_bell_glyph(draw, hi, fg_colour)
+    if off:
+        slash_start = (hi * 0.20, hi * 0.22)
+        slash_end = (hi * 0.80, hi * 0.82)
+        gap_w = max(4, round(hi / 16 * 5.0))
+        line_w = max(2, round(hi / 16 * 2.2))
+        draw.line([slash_start, slash_end], fill=bg_colour, width=gap_w)
+        draw.line([slash_start, slash_end], fill=fg_colour, width=line_w)
     return img.resize((size, size), Image.LANCZOS)
 
 
@@ -2102,10 +2140,10 @@ _snooze_qpixmaps: dict[str, QPixmap] = {}
 
 
 _SNOOZE_ICON_STYLES = {
-    "normal":       ("#3D3530", "#A8A29E"),
-    "hover":        ("#4A3728", "#FBBF24"),
-    "active":       ("#92400E", "#FEF3C7"),
-    "active_hover": ("#78350F", "#FFFFFF"),
+    "normal":       ("#3D3530", "#A8A29E", False),
+    "hover":        ("#4A3728", "#FBBF24", False),
+    "active":       ("#92400E", "#FEF3C7", True),
+    "active_hover": ("#78350F", "#FFFFFF", True),
 }
 
 
@@ -2113,9 +2151,9 @@ def _init_snooze_icons():
     """Generate snooze/unsnooze button icons (normal + hover). Call after QApplication exists."""
     if _snooze_qpixmaps:
         return
-    for key, (bg, fg) in _SNOOZE_ICON_STYLES.items():
+    for key, (bg, fg, off) in _SNOOZE_ICON_STYLES.items():
         _snooze_qpixmaps[key] = _pil_to_qpixmap(
-            _make_snooze_icon(bg_colour=bg, fg_colour=fg))
+            _make_snooze_icon(bg_colour=bg, fg_colour=fg, off=off))
 
 
 # Summit logo mark (green "S" play-button) — rendered from docs/summit.svg
@@ -2693,11 +2731,11 @@ class WorkflowRow(QWidget):
         self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
         self._snooze_btn.setFixedSize(24, 24)
         self._snooze_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._snooze_btn.setToolTip("Snooze — dim this row and exclude from tray status")
+        self._snooze_btn.setToolTip("Snooze — pause polling, dim the row, mute notifications")
         self._snooze_btn.mousePressEvent = lambda e: self._toggle_snooze()
         self._snooze_btn.enterEvent = lambda e: self._snooze_hover_enter()
         self._snooze_btn.leaveEvent = lambda e: self._snooze_hover_leave()
-        self._snooze_btn.setVisible(False)
+        self._snooze_btn.setVisible(True)
         left_col.addWidget(self._snooze_btn, 0, Qt.AlignmentFlag.AlignHCenter)
         main_layout.addLayout(left_col)
 
@@ -2814,6 +2852,9 @@ class WorkflowRow(QWidget):
 
     def set_snoozed(self, snoozed: bool):
         self._snoozed = snoozed
+        self._snooze_btn.setToolTip(
+            "Unsnooze — resume polling and notifications" if snoozed
+            else "Snooze — pause polling, dim the row, mute notifications")
         dim_text = "#57534E"
         dim_muted = "#44403C"
         if snoozed:
@@ -2960,15 +3001,10 @@ class WorkflowRow(QWidget):
             self._snooze_lbl.setVisible(self._snoozed)
             self._badge_widget.setVisible(self._snoozed)
 
-        # Snooze button visibility
-        if self._snoozed:
-            self._snooze_btn.setPixmap(_snooze_qpixmaps.get("active", QPixmap()))
-            self._snooze_btn.setVisible(True)
-        elif s.status == ST_FAILURE:
-            self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
-            self._snooze_btn.setVisible(True)
-        else:
-            self._snooze_btn.setVisible(False)
+        # Snooze button visibility (always visible)
+        key = "active" if self._snoozed else "normal"
+        self._snooze_btn.setPixmap(_snooze_qpixmaps.get(key, QPixmap()))
+        self._snooze_btn.setVisible(True)
 
 
 # ---------------------------------------------------------------------------
@@ -4197,6 +4233,10 @@ class MainWindow(QMainWindow):
         self._snoozed.discard(key)
         with _snoozed_lock:
             _snoozed_keys.discard(key)
+        # Wake the poller so the row refreshes immediately instead of waiting for next cycle
+        poller = self._pollers.get(key[0])
+        if poller:
+            poller.trigger_poll()
 
     def _restripe_rows(self):
         section_rows: dict[int, list[WorkflowRow]] = {}

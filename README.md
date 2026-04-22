@@ -70,7 +70,7 @@ Grab `ActionsMonitor.exe` (Windows) or `ActionsMonitor-linux` from [GitHub Relea
 
 ## Configuration
 
-Open `config.yaml` (or click **Open config ↗** in the app footer). The file is heavily commented — the key things to fill in are:
+Open `config.yaml` (or click **Open config ↗** in the app footer). The file is heavily commented — see [`config.template.yaml`](config.template.yaml) for a full example with every option documented. The key things to fill in are:
 
 ### GitHub token
 
@@ -91,7 +91,7 @@ github_token: "ghp_xxxxxxxxxxxxxxxxxxxx"
 
 ### Adding workflows
 
-There are three modes: **branch mode** (default) monitors a specific workflow+branch combo, **PR mode** monitors your own pull request builds, and **actor mode** shows all your recent runs across a repo.
+There are four modes: **branch mode** (default) monitors a specific workflow+branch combo, **PR mode** monitors your own pull request builds, **actor mode** shows all your recent runs across a repo, and **URL mode** renders any GitHub Search query (e.g. `is:pr is:open review-requested:@me`) as a PR inbox. See [`config.template.yaml`](config.template.yaml) for URL-mode and actor-mode examples.
 
 #### Branch mode
 
