@@ -2963,6 +2963,7 @@ class WorkflowRow(QWidget):
             url_fn=lambda: self._state.pr_url)
         self._pr_title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
         self._pr_title_lbl.setMinimumWidth(0)
+        self._pr_title_lbl.setWordWrap(True)
         self._pr_title_lbl.setVisible(False)
         centre.addWidget(self._pr_title_lbl)
 
@@ -2975,12 +2976,14 @@ class WorkflowRow(QWidget):
             state.name, url_fn=lambda: self._state.run_url or self._state.url)
         self._name_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
         self._name_lbl.setMinimumWidth(0)
+        self._name_lbl.setWordWrap(True)
         top_row.addWidget(self._name_lbl, 1)
 
         self._branch_lbl = _ClickableLabel(
             url_fn=lambda: self._state.run_url or self._state.url)
         self._branch_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
         self._branch_lbl.setMinimumWidth(0)
+        self._branch_lbl.setWordWrap(True)
         self._branch_lbl.setVisible(False)
         top_row.addWidget(self._branch_lbl, 1)
 
@@ -3022,6 +3025,7 @@ class WorkflowRow(QWidget):
         self._info_lbl = QLabel()
         self._info_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
         self._info_lbl.setMinimumWidth(0)
+        self._info_lbl.setWordWrap(True)
         centre.addWidget(self._info_lbl)
 
         main_layout.addLayout(centre, 1)
@@ -3051,7 +3055,7 @@ class WorkflowRow(QWidget):
         right_wrap.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Preferred)
         main_layout.addWidget(right_wrap)
 
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
         self._apply_background()
         self._update_labels()
 
