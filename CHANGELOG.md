@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-04-23
+
+- **Fix missing PR rows for zero-CI branches** — PR-mode sections dropped rows for branches whose open PRs had no workflow runs yet (typically new drafts that haven't triggered CI, or branches where the primary/extra workflows simply don't run). `_poll()` grouped runs by `head_branch` and a branch with zero runs never entered `by_branch`, so the downstream render loop never saw it. Now every branch in `open_pr_branches` is seeded into `by_branch` (empty list if no runs), PR numbers for zero-run branches are populated from the already-fetched `open_prs` list instead of relying on the `_fetch_prs_for_branch` fallback, and the render path tolerates an empty `group_runs` by emitting `ST_UNKNOWN` with no run fields set.
+
 ### 2026-04-22
 
 - **Code review pass** — removed dead Linux focus-script code (`_FOCUS_SH` + `_ensure_focus_sh()` were created but never wired up; plyer can't launch them). Extracted shared `_aggregate_review_status()` + `_cached_review_fetch()` helpers so `PRWorkflowPoller._fetch_pr_review_status()` and `URLQueryPoller._fetch_review_status()` no longer duplicate ~20 lines of cache-TTL + aggregate logic. Added `_PR_CACHE_MAX` / `_REVIEW_CACHE_MAX` (200) with a small `_prune_cache()` helper to stop `_pr_cache` / `_review_cache` growing unbounded on long sessions. Fixed a stale-event race in `_reload_pollers()`: config hot-reload now drains the event queue after stopping old pollers so in-flight events referencing stale `wid`s can't hit the freshly-cleared state. Replaced two O(n) `next(... in _section_content.items())` reverse-lookups in `_apply_event()` with a preserved `_container_to_title` map (built at section creation, cleared in `_destroy_sections`).

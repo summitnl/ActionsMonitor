@@ -1236,6 +1236,11 @@ class PRWorkflowPoller(WorkflowPoller):
             open_prs = []
         open_pr_branches = {pr["branch"] for pr in open_prs}
         user_pr_numbers = {pr["number"] for pr in open_prs}
+        # Group open PRs by branch — used as fallback when runs don't surface PR data
+        # and to render branches with zero CI runs yet (new draft PRs).
+        branch_to_open_prs: dict[str, list[dict]] = {}
+        for pr in open_prs:
+            branch_to_open_prs.setdefault(pr["branch"], []).append(pr)
         for pr in open_prs:
             branch = pr["branch"]
             if branch in branches_with_runs:
@@ -1269,6 +1274,11 @@ class PRWorkflowPoller(WorkflowPoller):
                 seen_wf_per_branch[hb].add(wf_path)
                 by_branch[hb].append(run)
 
+        # Ensure every open-PR branch is represented, even if it has zero runs yet
+        # (new drafts that haven't triggered CI). Empty list = render with unknown status.
+        for branch in open_pr_branches:
+            by_branch.setdefault(branch, [])
+
         # Limit to max_prs (order by most recent run across all workflows)
         branch_order = sorted(
             by_branch.keys(),
@@ -1297,7 +1307,11 @@ class PRWorkflowPoller(WorkflowPoller):
                         continue
                     pr_numbers_seen[pr_num] = pr_entry.get("base", {}).get("ref", "")
 
-            # Fallback: query the Pulls API when workflow runs lack PR data
+            # Fallback when workflow runs lack PR data: prefer already-fetched
+            # open_prs (covers zero-run branches), fall back to Pulls API query.
+            if not pr_numbers_seen:
+                for pr_info in branch_to_open_prs.get(branch_name, []):
+                    pr_numbers_seen[pr_info["number"]] = pr_info["base_ref"]
             if not pr_numbers_seen:
                 for pr_info in self._fetch_prs_for_branch(branch_name, token):
                     if open_prs_ok and pr_info["number"] not in user_pr_numbers:
@@ -1377,13 +1391,12 @@ class PRWorkflowPoller(WorkflowPoller):
                         rep_priority = p
                         representative_run = run
 
-                if representative_run is None:
+                if representative_run is None and group_runs:
                     representative_run = group_runs[0]
 
-                # Aggregate status (worst wins)
-                agg_status = _worst_status(set(run_statuses))
+                # Aggregate status (worst wins). Empty runs = unknown (zero-CI drafts).
+                agg_status = _worst_status(set(run_statuses)) if run_statuses else ST_UNKNOWN
 
-                run = representative_run
                 state = WorkflowState(
                     name=self.name_display,
                     url=self.cfg_entry.get("url", ""),
@@ -1392,11 +1405,13 @@ class PRWorkflowPoller(WorkflowPoller):
                 )
                 state.last_check = now
                 state.status     = agg_status
-                state.run_id     = run.get("id")
-                state.run_url    = run.get("html_url")
-                state.run_number = run.get("run_number")
-                state.started_at = run.get("run_started_at") or run.get("created_at")
-                state.run_updated_at = run.get("updated_at")
+                if representative_run is not None:
+                    run = representative_run
+                    state.run_id     = run.get("id")
+                    state.run_url    = run.get("html_url")
+                    state.run_number = run.get("run_number")
+                    state.started_at = run.get("run_started_at") or run.get("created_at")
+                    state.run_updated_at = run.get("updated_at")
 
                 # Parse branch prefix
                 prefix, short = parse_branch_prefix(branch_name)
