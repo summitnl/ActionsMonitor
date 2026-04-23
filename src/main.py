@@ -35,8 +35,8 @@ import tempfile
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
     QVBoxLayout, QHBoxLayout, QFrame, QScrollArea, QCheckBox, QMenu,
     QDialog, QSystemTrayIcon, QMessageBox, QPushButton, QSizePolicy,
-    QGraphicsOpacityEffect)
-from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QEvent
+    QGraphicsOpacityEffect, QProgressBar)
+from PySide6.QtCore import Qt, QTimer, QPoint, QSize, QEvent, Signal
 from PySide6.QtGui import QPixmap, QImage, QIcon, QCursor, QFont, QColor, QMouseEvent
 
 # ---------------------------------------------------------------------------
@@ -3234,12 +3234,16 @@ class UpdateChecker:
         return None
 
     @staticmethod
-    def apply_update() -> tuple[bool, str]:
-        """Download latest release binary. Returns (success, message)."""
-        return UpdateChecker._apply_release_update()
+    def apply_update(progress_cb=None) -> tuple[bool, str]:
+        """Download latest release binary. Returns (success, message).
+
+        progress_cb(bytes_written, expected_size) fires after each chunk.
+        expected_size may be 0 when the asset metadata omits a size.
+        """
+        return UpdateChecker._apply_release_update(progress_cb)
 
     @staticmethod
-    def _apply_release_update() -> tuple[bool, str]:
+    def _apply_release_update(progress_cb=None) -> tuple[bool, str]:
         """Download the latest release binary to a staging path.
 
         Does NOT swap the running executable — swap happens in a detached
@@ -3265,17 +3269,21 @@ class UpdateChecker:
                 return False, f"Asset '{asset_name}' not found in release"
 
             download_url = asset["browser_download_url"]
-            expected_size = asset.get("size")
+            expected_size = asset.get("size") or 0
             current_exe = Path(sys.executable)
             tmp_path = current_exe.with_suffix(".update")
 
             bytes_written = 0
+            if progress_cb:
+                progress_cb(0, expected_size)
             with requests.get(download_url, stream=True, timeout=120) as dl:
                 dl.raise_for_status()
                 with open(tmp_path, "wb") as f:
                     for chunk in dl.iter_content(chunk_size=65536):
                         f.write(chunk)
                         bytes_written += len(chunk)
+                        if progress_cb:
+                            progress_cb(bytes_written, expected_size)
 
             if expected_size and bytes_written != expected_size:
                 try:
@@ -3378,13 +3386,18 @@ class UpdateChecker:
 
 class UpdateDialog(QDialog):
     """Modal dark-themed update dialog."""
+
+    # Signal emitted from the download thread so progress updates land on
+    # the Qt main thread via Qt's auto queued-connection semantics.
+    _progress = Signal(int, int)
+
     def __init__(self, commit_hash: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle(f"{APP_NAME} — Update Available")
 
         source = _detect_install_source()
         managed_cmd = _MANAGED_UPGRADE_CMD.get(source)
-        self.setFixedSize(420, 280 if managed_cmd else 240)
+        self.setFixedSize(420, 280 if managed_cmd else 260)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -3422,6 +3435,17 @@ class UpdateDialog(QDialog):
         self._status_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 12px;")
         layout.addWidget(self._status_lbl)
 
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setFixedHeight(6)
+        self._progress_bar.setStyleSheet(
+            f"QProgressBar {{ background-color: {BG_ROW}; border: none; border-radius: 3px; }}"
+            f"QProgressBar::chunk {{ background-color: {FG_LINK}; border-radius: 3px; }}"
+        )
+        self._progress_bar.hide()
+        layout.addWidget(self._progress_bar)
+        self._progress.connect(self._on_progress)
+
         layout.addStretch()
 
         btn_layout = QHBoxLayout()
@@ -3456,21 +3480,39 @@ class UpdateDialog(QDialog):
     def _do_update(self):
         self._update_btn.setEnabled(False)
         self._skip_btn.setEnabled(False)
-        self._status_lbl.setText("Updating...")
+        self._status_lbl.setText("Downloading…")
         self._status_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+        self._progress_bar.setRange(0, 0)  # indeterminate until first chunk
+        self._progress_bar.show()
 
         def _run():
-            ok, msg = UpdateChecker.apply_update()
+            ok, msg = UpdateChecker.apply_update(progress_cb=self._progress.emit)
             QTimer.singleShot(0, lambda: self._on_result(ok, msg))
 
         threading.Thread(target=_run, daemon=True).start()
 
+    def _on_progress(self, bytes_written: int, expected_size: int):
+        if expected_size > 0:
+            if self._progress_bar.maximum() == 0:
+                self._progress_bar.setRange(0, expected_size)
+            self._progress_bar.setValue(bytes_written)
+            mb_done = bytes_written / (1024 * 1024)
+            mb_total = expected_size / (1024 * 1024)
+            pct = int(bytes_written * 100 / expected_size) if expected_size else 0
+            self._status_lbl.setText(f"Downloading… {mb_done:.1f} / {mb_total:.1f} MB ({pct}%)")
+        else:
+            mb_done = bytes_written / (1024 * 1024)
+            self._status_lbl.setText(f"Downloading… {mb_done:.1f} MB")
+
     def _on_result(self, ok, msg):
         if ok:
+            self._progress_bar.setRange(0, 1)
+            self._progress_bar.setValue(1)
             self._status_lbl.setText("Update complete — restarting...")
             self._status_lbl.setStyleSheet(f"color: {COLOUR[ST_SUCCESS]}; font-size: 12px;")
             QTimer.singleShot(500, UpdateChecker.restart_app)
         else:
+            self._progress_bar.hide()
             self._status_lbl.setText(f"Update failed: {msg}")
             self._status_lbl.setStyleSheet(f"color: {COLOUR[ST_FAILURE]}; font-size: 12px;")
             self._skip_btn.setEnabled(True)
