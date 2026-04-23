@@ -2,233 +2,24 @@ name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      enable_scoop:
+        description: "Publish Scoop manifest bump"
+        type: boolean
+        default: true
+      enable_winget:
+        description: "Submit winget update"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    outputs:
-      should_build: ${{ steps.check.outputs.should_build }}
-      short_sha: ${{ steps.check.outputs.short_sha }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Check for changes since last release
-        id: check
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # targetCommitish may return a branch name instead of a SHA —
-          # resolve it so the comparison always uses full SHAs.
-          LATEST_REF=$(gh release view --json targetCommitish -q '.targetCommitish' 2>/dev/null || echo "")
-          if [ -n "$LATEST_REF" ]; then
-            LATEST=$(git rev-parse "$LATEST_REF" 2>/dev/null || echo "")
-          else
-            LATEST=""
-          fi
-          HEAD=$(git rev-parse HEAD)
-          SHORT=$(git rev-parse --short=7 HEAD)
-          if [ "$LATEST" = "$HEAD" ]; then
-            echo "should_build=false" >> "$GITHUB_OUTPUT"
-            echo "No changes since last release ($SHORT)"
-          else
-            echo "should_build=true" >> "$GITHUB_OUTPUT"
-            echo "short_sha=$SHORT" >> "$GITHUB_OUTPUT"
-            echo "Changes detected ($SHORT)"
-          fi
-
-  build-windows:
-    needs: check
-    if: needs.check.outputs.should_build == 'true'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r src/requirements.txt
-
-      - name: Generate app icon
-        run: python -c "import sys; sys.path.insert(0, 'src'); from main import _generate_app_ico; _generate_app_ico()"
-
-      - name: Embed build version
-        run: |
-          echo '"""Build version — written by CI."""' > src/version.py
-          echo 'BUILD_COMMIT = "${{ needs.check.outputs.short_sha }}"' >> src/version.py
-
-      - name: Build executable
-        run: >
-          pyinstaller --onefile --noconsole
-          --name ActionsMonitor
-          --icon=app.ico
-          --add-data "config.template.yaml;."
-          src/main.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: windows-binary
-          path: dist/ActionsMonitor.exe
-
-  build-linux:
-    needs: check
-    if: needs.check.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y python3-tk gir1.2-gtk-3.0 gir1.2-ayatanaappindicator3-0.1
-
-      - name: Install Python dependencies
-        run: |
-          grep -vi winotify src/requirements.txt | pip install -r /dev/stdin
-          pip install pyinstaller
-
-      - name: Embed build version
-        run: |
-          echo '"""Build version — written by CI."""' > src/version.py
-          echo "BUILD_COMMIT = \"${{ needs.check.outputs.short_sha }}\"" >> src/version.py
-
-      - name: Build binary
-        run: >
-          pyinstaller --onefile
-          --name ActionsMonitor-linux
-          --add-data "config.template.yaml:."
-          src/main.py
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: linux-binary
-          path: dist/ActionsMonitor-linux
-
   release:
-    needs: [check, build-windows, build-linux]
-    if: needs.check.outputs.should_build == 'true'
-    runs-on: ubuntu-latest
-    outputs:
-      version_tag: ${{ steps.create.outputs.version_tag }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-binary
-          path: artifacts/
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: linux-binary
-          path: artifacts/
-
-      - name: Extract changelog
-        id: changelog
-        run: |
-          # Extract the first dated section from CHANGELOG.md
-          BODY=$(awk '/^### [0-9]{4}-/{if(found) exit; found=1} found' CHANGELOG.md)
-          if [ -z "$BODY" ]; then
-            BODY="No changelog entry for this release."
-          fi
-          echo "$BODY" > release_notes.md
-
-      - name: Create release
-        id: create
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # Tag strategy: v<date> first, then v<date>.2, v<date>.3, etc.
-          # GitHub's immutable-releases feature permanently reserves tag
-          # names (even after the release is deleted), and there's no API
-          # to query the reservation list — so retry on-failure instead of
-          # pre-checking.
-          BASE="v$(date -u +%Y.%m.%d)"
-          TAG="$BASE"
-          N=2
-          for attempt in $(seq 1 20); do
-            OUT=$(mktemp)
-            if gh release create "$TAG" \
-                 --title "Actions Monitor $TAG" \
-                 --notes-file release_notes.md \
-                 --target "${{ github.sha }}" \
-                 artifacts/ActionsMonitor.exe \
-                 artifacts/ActionsMonitor-linux > "$OUT" 2>&1; then
-              cat "$OUT"
-              echo "version_tag=$TAG" >> "$GITHUB_OUTPUT"
-              echo "Released as $TAG"
-              exit 0
-            fi
-            cat "$OUT"
-            if grep -qE "immutable release|Cannot create ref|already_exists|already exists" "$OUT"; then
-              TAG="${BASE}.${N}"
-              N=$((N + 1))
-              echo "Tag reserved, retrying as $TAG"
-              continue
-            fi
-            echo "Release creation failed for unrecoverable reason"
-            exit 1
-          done
-          echo "Exhausted tag-suffix attempts"
-          exit 1
-
-  update-scoop:
-    needs: [release]
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: windows-binary
-          path: artifacts/
-
-      - name: Refresh manifest
-        run: |
-          TAG="${{ needs.release.outputs.version_tag }}"
-          VERSION="${TAG#v}"
-          HASH=$(sha256sum artifacts/ActionsMonitor.exe | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
-          URL="https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
-          jq --arg v "$VERSION" --arg h "$HASH" --arg u "$URL" \
-             '.version=$v | .hash=$h | .url=$u' bucket/actionsmonitor.json \
-             > bucket/actionsmonitor.json.tmp
-          mv bucket/actionsmonitor.json.tmp bucket/actionsmonitor.json
-
-      - name: Commit manifest bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add bucket/actionsmonitor.json
-          if ! git diff --cached --quiet; then
-            git commit -m "chore: bump scoop manifest to ${{ needs.release.outputs.version_tag }}"
-            git push
-          fi
-
-  update-winget:
-    needs: [release]
-    runs-on: windows-latest
-    steps:
-      - name: Submit winget update
-        shell: pwsh
-        run: |
-          $TAG = "${{ needs.release.outputs.version_tag }}"
-          $VERSION = $TAG.TrimStart("v")
-          $URL = "https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
-          Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          ./wingetcreate.exe update Summit.ActionsMonitor `
-              --version $VERSION `
-              --urls $URL `
-              --submit `
-              --token "${{ secrets.WINGET_PAT }}"
+    uses: ./.github/workflows/_release.yml
+    with:
+      enable_scoop: ${{ inputs.enable_scoop }}
+      enable_winget: ${{ inputs.enable_winget }}
+      tag_strategy: suffix
+    secrets: inherit
