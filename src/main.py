@@ -522,6 +522,14 @@ def _github_api_get(url: str, token: str, session: Optional[requests.Session] = 
         _set_cooldown(wait, f"HTTP {status}")
         raise RateLimited(wait, f"HTTP {status}")
 
+    # 401 Unauthorized — token revoked/rotated. Invalidate the cached username
+    # so the next poll re-resolves against the current token instead of loop-
+    # ing with a stale login in actor= params.
+    if status == 401:
+        global _cached_github_username
+        with _github_username_lock:
+            _cached_github_username = None
+
     resp.raise_for_status()
     data = resp.json()
 
@@ -1275,6 +1283,11 @@ class PRWorkflowPoller(WorkflowPoller):
         # Review status cache: pr_number → (status, fetch_time)
         self._review_cache: dict[int, tuple[Optional[str], float]] = {}
         self._review_cache_ttl: float = 120.0  # seconds — reviews change less often than CI
+        # Short TTL cache on top of the global ETag layer — skips issuing the
+        # per-branch runs HTTP call entirely on rapid successive polls (manual
+        # refresh bursts, overlapping workflows). Keyed by (wf_file, branch).
+        self._branch_runs_cache: dict[tuple[str, str], tuple[list[dict], float]] = {}
+        self._branch_runs_ttl: float = 30.0
         # Parsed staleness thresholds (refreshed on each poll from config)
         self._staleness_thresholds: list[tuple[int, str]] = self._parse_staleness(config_mgr.get())
 
@@ -1630,12 +1643,21 @@ class PRWorkflowPoller(WorkflowPoller):
 
     def _fetch_branch_runs(self, wf_file: str, branch: str, token: str) -> list[dict]:
         """Fetch latest workflow runs for a specific branch."""
+        key = (wf_file, branch)
+        cached = self._branch_runs_cache.get(key)
+        if cached is not None:
+            runs, fetched_at = cached
+            if time.monotonic() - fetched_at < self._branch_runs_ttl:
+                return runs
         url = (
             f"https://api.github.com/repos/{self.owner}/{self.repo}"
             f"/actions/workflows/{wf_file}/runs"
         )
         params = {"branch": branch, "per_page": 1}
-        return _github_api_get(url, token, self._session, params).get("workflow_runs", [])
+        runs = _github_api_get(url, token, self._session, params).get("workflow_runs", [])
+        self._branch_runs_cache[key] = (runs, time.monotonic())
+        _prune_cache(self._branch_runs_cache, 200)
+        return runs
 
     def _fetch_prs_for_branch(self, branch: str, token: str) -> list[dict]:
         """Fetch open PRs for a head branch. Returns list of {number, base_ref}."""
@@ -4421,8 +4443,9 @@ class MainWindow(QMainWindow):
         self._pollers.clear()
 
     def _refresh_all(self):
-        for p in self._pollers.values():
-            p.trigger_poll()
+        # Stagger wakes so N pollers don't fire a synchronized request burst.
+        for i, p in enumerate(self._pollers.values()):
+            QTimer.singleShot(i * 75, p.trigger_poll)
 
     def _check_for_updates(self, manual: bool = False):
         if not getattr(sys, "frozen", False):
