@@ -484,11 +484,66 @@ def parse_actor_url(url: str) -> tuple[str, str, Optional[str]]:
 
 def _github_api_get(url: str, token: str, session: Optional[requests.Session] = None,
                     params: Optional[dict] = None, timeout: int = 15):
-    """Perform a GitHub API GET request with standard headers."""
+    """GET with ETag conditional-request cache + rate-limit cooldown gate.
+
+    - Sends `If-None-Match` when a prior ETag is cached; on 304 returns the
+      cached JSON (these don't count against GitHub's primary rate limit).
+    - On 429 or secondary 403 (rate-limit messages), or when X-RateLimit-Remaining
+      hits 0, advances a module-level cooldown so all pollers throttle together.
+    - While in cooldown, raises `RateLimited` without hitting the network.
+    """
+    # Cooldown short-circuit — skip the call entirely.
+    remaining, reason = _cooldown_remaining()
+    if remaining > 0:
+        raise RateLimited(remaining, reason or "cooldown")
+
+    cache_key = (url, _params_key(params))
+    with _etag_lock:
+        cached = _etag_cache.get(cache_key)
+
+    headers = _gh_headers(token)
+    if cached:
+        headers["If-None-Match"] = cached[0]
+
     _get = (session or requests).get
-    resp = _get(url, params=params, headers=_gh_headers(token), timeout=timeout)
+    resp = _get(url, params=params, headers=headers, timeout=timeout)
+    status = resp.status_code
+
+    # 304 Not Modified — free, return cached payload.
+    if status == 304 and cached:
+        return cached[1]
+
+    # 429 or secondary-limit 403: trip cooldown and raise.
+    if status == 429 or (
+        status == 403
+        and "rate limit" in (resp.text or "").lower()
+    ):
+        wait = _parse_retry_after(resp)
+        _set_cooldown(wait, f"HTTP {status}")
+        raise RateLimited(wait, f"HTTP {status}")
+
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+
+    # Primary limit exhausted — set cooldown until reset even though this call succeeded.
+    remaining_hdr = resp.headers.get("X-RateLimit-Remaining")
+    if remaining_hdr is not None:
+        try:
+            if int(remaining_hdr) == 0:
+                reset_hdr = resp.headers.get("X-RateLimit-Reset")
+                if reset_hdr:
+                    wait = max(0.0, int(reset_hdr) - time.time())
+                    _set_cooldown(wait, "primary limit exhausted")
+        except ValueError:
+            pass
+
+    # Cache ETag + parsed body so the next identical request can 304.
+    etag = resp.headers.get("ETag")
+    if etag:
+        with _etag_lock:
+            _etag_cache[cache_key] = (etag, data)
+            _prune_cache(_etag_cache, _ETAG_CACHE_MAX)
+    return data
 
 
 def _aggregate_review_status(reviews: list[dict]) -> str:
@@ -530,6 +585,7 @@ def _cached_review_fetch(url: str, token: str, session: Optional[requests.Sessio
 # Cache caps — prevent unbounded growth over long sessions
 _PR_CACHE_MAX = 200
 _REVIEW_CACHE_MAX = 200
+_ETAG_CACHE_MAX = 300
 
 
 def _prune_cache(cache: dict, max_size: int):
@@ -539,6 +595,69 @@ def _prune_cache(cache: dict, max_size: int):
         return
     for k in list(cache.keys())[:excess]:
         cache.pop(k, None)
+
+
+# ETag / conditional-request cache — 304 responses don't count against
+# GitHub's primary rate limit, so every hit here is a free poll.
+# Keyed by (url, sorted-params-tuple) → (etag, parsed_json).
+_etag_cache: dict = {}
+_etag_lock = threading.Lock()
+
+# Rate-limit cooldown gate. When GitHub returns 429 / secondary 403 /
+# primary-limit exhaustion, _rate_limit_until (monotonic seconds) is advanced;
+# subsequent _github_api_get calls short-circuit with RateLimited until it lapses.
+_rate_limit_until: float = 0.0
+_rate_limit_reason: str = ""
+_rate_limit_lock = threading.Lock()
+
+
+class RateLimited(Exception):
+    """Raised by _github_api_get while the cooldown gate is active."""
+    def __init__(self, retry_after: float, reason: str = ""):
+        super().__init__(
+            f"GitHub rate limited — retry in {int(retry_after)}s ({reason})"
+        )
+        self.retry_after = retry_after
+        self.reason = reason
+
+
+def _params_key(params: Optional[dict]) -> tuple:
+    if not params:
+        return ()
+    return tuple(sorted((str(k), str(v)) for k, v in params.items()))
+
+
+def _parse_retry_after(resp) -> float:
+    """Seconds to wait before retrying. Prefers Retry-After, falls back to X-RateLimit-Reset."""
+    ra = resp.headers.get("Retry-After")
+    if ra:
+        try:
+            return max(0.0, float(ra))
+        except ValueError:
+            pass  # HTTP-date form — ignore, fall through to Reset
+    reset = resp.headers.get("X-RateLimit-Reset")
+    if reset:
+        try:
+            return max(0.0, int(reset) - time.time())
+        except ValueError:
+            pass
+    return 60.0  # conservative default when GitHub gives no hint
+
+
+def _set_cooldown(seconds: float, reason: str):
+    global _rate_limit_until, _rate_limit_reason
+    if seconds <= 0:
+        return
+    with _rate_limit_lock:
+        new_until = time.monotonic() + seconds
+        if new_until > _rate_limit_until:
+            _rate_limit_until = new_until
+            _rate_limit_reason = reason
+
+
+def _cooldown_remaining() -> tuple[float, str]:
+    with _rate_limit_lock:
+        return max(0.0, _rate_limit_until - time.monotonic()), _rate_limit_reason
 
 
 def fetch_latest_run(
