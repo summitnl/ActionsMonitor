@@ -3498,25 +3498,45 @@ class UpdateChecker:
 
         if IS_WINDOWS:
             script = tmp_dir / f"am_update_{pid}.bat"
+            log_path = tmp_dir / "am_update.log"
             script.write_text(
                 "@echo off\r\n"
+                f'set "LOG={log_path}"\r\n'
+                'echo === am_update helper starting === > "%LOG%"\r\n'
+                'echo date=%DATE% time=%TIME% >> "%LOG%"\r\n'
+                f'echo pid={pid} >> "%LOG%"\r\n'
+                f'echo current_exe={current_exe} >> "%LOG%"\r\n'
+                f'echo update_path={update_path} >> "%LOG%"\r\n'
+                f'echo old_path={old_path} >> "%LOG%"\r\n'
+                'echo [waiting for pid to exit] >> "%LOG%"\r\n'
                 ":waitpid\r\n"
                 f'tasklist /FI "PID eq {pid}" 2>nul | findstr /C:"{pid}" >nul\r\n'
                 "if %errorlevel% EQU 0 (\r\n"
                 "  ping -n 2 127.0.0.1 >nul\r\n"
                 "  goto waitpid\r\n"
                 ")\r\n"
+                'echo [pid exited, attempting swap] >> "%LOG%"\r\n'
                 "set /a tries=0\r\n"
                 ":tryrename\r\n"
-                f'move /y "{current_exe}" "{old_path}" >nul 2>&1\r\n'
+                f'move /y "{current_exe}" "{old_path}" >> "%LOG%" 2>&1\r\n'
                 "if errorlevel 1 (\r\n"
-                "  ping -n 2 127.0.0.1 >nul\r\n"
+                '  echo [rename current-^>old failed, try=%tries%] >> "%LOG%"\r\n'
+                "  ping -n 3 127.0.0.1 >nul\r\n"
                 "  set /a tries+=1\r\n"
-                "  if %tries% LSS 10 goto tryrename\r\n"
+                "  if %tries% LSS 30 goto tryrename\r\n"
+                '  echo [FAILED: could not rename current exe after 30 tries] >> "%LOG%"\r\n'
                 "  exit /b 1\r\n"
                 ")\r\n"
-                f'move /y "{update_path}" "{current_exe}" >nul 2>&1\r\n'
+                'echo [renamed current-^>old, moving new into place] >> "%LOG%"\r\n'
+                f'move /y "{update_path}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                "if errorlevel 1 (\r\n"
+                '  echo [FAILED: could not move new into place; restoring backup] >> "%LOG%"\r\n'
+                f'  move /y "{old_path}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                "  exit /b 1\r\n"
+                ")\r\n"
+                'echo [launching new exe] >> "%LOG%"\r\n'
                 f'start "" "{current_exe}"\r\n'
+                'echo [done] >> "%LOG%"\r\n'
                 '(goto) 2>nul & del "%~f0"\r\n',
                 encoding="ascii",
             )
@@ -3532,13 +3552,33 @@ class UpdateChecker:
             )
         else:
             script = tmp_dir / f"am_update_{pid}.sh"
+            log_path = tmp_dir / "am_update.log"
             script.write_text(
                 "#!/bin/sh\n"
+                f'LOG="{log_path}"\n'
+                'exec >>"$LOG" 2>&1\n'
+                'echo "=== am_update helper starting ==="\n'
+                'echo "date=$(date)"\n'
+                f'echo "pid={pid}"\n'
+                f'echo "current_exe={current_exe}"\n'
+                f'echo "update_path={update_path}"\n'
+                f'echo "old_path={old_path}"\n'
+                "echo '[waiting for pid to exit]'\n"
                 f"while kill -0 {pid} 2>/dev/null; do sleep 0.5; done\n"
-                f'mv -f "{current_exe}" "{old_path}"\n'
-                f'mv -f "{update_path}" "{current_exe}"\n'
+                "echo '[pid exited, attempting swap]'\n"
+                f'if ! mv -f "{current_exe}" "{old_path}"; then\n'
+                "  echo '[FAILED: rename current->old]'\n"
+                "  exit 1\n"
+                "fi\n"
+                f'if ! mv -f "{update_path}" "{current_exe}"; then\n'
+                "  echo '[FAILED: move new into place; restoring backup]'\n"
+                f'  mv -f "{old_path}" "{current_exe}"\n'
+                "  exit 1\n"
+                "fi\n"
                 f'chmod +x "{current_exe}"\n'
+                "echo '[launching new exe]'\n"
                 f'nohup "{current_exe}" >/dev/null 2>&1 &\n'
+                "echo '[done]'\n"
                 'rm -- "$0"\n'
             )
             script.chmod(0o755)
