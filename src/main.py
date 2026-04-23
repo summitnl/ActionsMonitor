@@ -837,6 +837,7 @@ class WorkflowState:
     jira_key:      Optional[str] = None
     staleness_level: Optional[str] = None  # "slightly_stale" | "moderately_stale" | "very_stale"
     pr_updated_at:   Optional[str] = None  # ISO 8601 from GitHub PR API
+    has_conflict:    bool = False          # True when PR mergeable_state == "dirty"
 
 
 # ---------------------------------------------------------------------------
@@ -1290,6 +1291,9 @@ class PRWorkflowPoller(WorkflowPoller):
         # Review status cache: pr_number → (status, fetch_time)
         self._review_cache: dict[int, tuple[Optional[str], float]] = {}
         self._review_cache_ttl: float = 120.0  # seconds — reviews change less often than CI
+        # Mergeable state cache: pr_number → (has_conflict, fetch_time)
+        self._mergeable_cache: dict[int, tuple[bool, float]] = {}
+        self._mergeable_cache_ttl: float = 120.0
         # Short TTL cache on top of the global ETag layer — skips issuing the
         # per-branch runs HTTP call entirely on rapid successive polls (manual
         # refresh bursts, overlapping workflows). Keyed by (wf_file, branch).
@@ -1569,6 +1573,7 @@ class PRWorkflowPoller(WorkflowPoller):
                         state.pr_target = cached.get("base_ref", "")
                     state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
                     state.review_status = self._fetch_pr_review_status(pr_num, token)
+                    state.has_conflict  = self._fetch_pr_mergeable(pr_num, token)
 
                     # Compute PR staleness from updated_at
                     updated_at_str = self._pr_cache.get(pr_num, {}).get("updated_at", "")
@@ -1693,6 +1698,7 @@ class PRWorkflowPoller(WorkflowPoller):
         if pr_num is not None:
             self._pr_cache.pop(pr_num, None)
             self._review_cache.pop(pr_num, None)
+            self._mergeable_cache.pop(pr_num, None)
 
     @staticmethod
     def _pr_num_from_sub_key(sk: str) -> Optional[int]:
@@ -1716,6 +1722,30 @@ class PRWorkflowPoller(WorkflowPoller):
             url, token, self._session,
             self._review_cache, pr_number, self._review_cache_ttl,
         )
+
+    def _fetch_pr_mergeable(self, pr_number: int, token: str) -> bool:
+        """Return True if the PR has merge conflicts (mergeable_state == 'dirty').
+        Cached for _mergeable_cache_ttl seconds. GitHub computes mergeable lazily —
+        first call after a push may return null; we return the cached value in that case."""
+        cached = self._mergeable_cache.get(pr_number)
+        if cached is not None:
+            val, fetched_at = cached
+            if time.monotonic() - fetched_at < self._mergeable_cache_ttl:
+                return val
+        url = f"https://api.github.com/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
+        try:
+            data = _github_api_get(url, token, self._session)
+            state = data.get("mergeable_state", "unknown")
+            # GitHub computes mergeable lazily; "unknown" means not ready yet —
+            # retry next poll instead of caching a false negative.
+            if state == "unknown":
+                return cached[0] if cached else False
+            result = (state == "dirty")
+            self._mergeable_cache[pr_number] = (result, time.monotonic())
+            _prune_cache(self._mergeable_cache, _REVIEW_CACHE_MAX)
+            return result
+        except Exception:
+            return cached[0] if cached else False
 
 
 # ---------------------------------------------------------------------------
@@ -2017,6 +2047,7 @@ class URLQueryPoller(WorkflowPoller):
             state.pr_target     = (pr_detail or {}).get("base_ref", "")
             state.is_draft      = (pr_detail or {}).get("draft", bool(item.get("draft", False)))
             state.review_status = review_status
+            state.has_conflict  = (pr_detail or {}).get("mergeable_state") == "dirty"
 
             updated_at_str = item.get("updated_at", "")
             if updated_at_str:
@@ -2059,6 +2090,7 @@ class URLQueryPoller(WorkflowPoller):
             "draft":    data.get("draft", False),
             "base_ref": data.get("base", {}).get("ref", ""),
             "head_ref": data.get("head", {}).get("ref", ""),
+            "mergeable_state": data.get("mergeable_state", "unknown"),
         }
         self._pr_cache[key] = detail
         _prune_cache(self._pr_cache, _PR_CACHE_MAX)
@@ -3001,6 +3033,10 @@ class WorkflowRow(QWidget):
         self._draft_lbl = _make_badge("DRAFT", "#92400E", "#FEF3C7", bold=True)
         badge_layout.addWidget(self._draft_lbl)
 
+        self._conflict_lbl = _make_badge("\u26A0 CONFLICT", "#7F1D1D", "#FEE2E2", bold=True)
+        self._conflict_lbl.setToolTip("This PR has merge conflicts that must be resolved")
+        badge_layout.addWidget(self._conflict_lbl)
+
         self._jira_lbl = _make_badge("", "#302830", "#A78BFA")
         self._jira_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         self._jira_lbl.mousePressEvent = lambda e: self._open_jira()
@@ -3125,6 +3161,7 @@ class WorkflowRow(QWidget):
     def _restyle_static_badges(self):
         self._prefix_lbl.setStyleSheet(self._badge_css("#3D3530", "#FBBF24"))
         self._draft_lbl.setStyleSheet(self._badge_css("#92400E", "#FEF3C7", bold=True))
+        self._conflict_lbl.setStyleSheet(self._badge_css("#7F1D1D", "#FEE2E2", bold=True))
         self._jira_lbl.setStyleSheet(self._badge_css("#302830", "#A78BFA"))
 
     def _open_jira(self):
@@ -3189,6 +3226,10 @@ class WorkflowRow(QWidget):
             if s.is_draft:
                 has_badges = True
 
+            self._conflict_lbl.setVisible(bool(s.has_conflict))
+            if s.has_conflict:
+                has_badges = True
+
             if s.jira_key and self._jira_base_url:
                 self._jira_lbl.setText(s.jira_key)
                 self._jira_lbl.setVisible(True)
@@ -3227,6 +3268,7 @@ class WorkflowRow(QWidget):
             self._branch_lbl.setVisible(False)
             self._prefix_lbl.setVisible(False)
             self._draft_lbl.setVisible(False)
+            self._conflict_lbl.setVisible(False)
             self._jira_lbl.setVisible(False)
             self._review_lbl.setVisible(False)
             self._stale_lbl.setVisible(False)
