@@ -29,6 +29,7 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
 import stat
 import base64
+import hashlib
 import io
 import tempfile
 
@@ -510,8 +511,14 @@ def _github_api_get(url: str, token: str, session: Optional[requests.Session] = 
     status = resp.status_code
 
     # 304 Not Modified — free, return cached payload.
-    if status == 304 and cached:
-        return cached[1]
+    if status == 304:
+        if cached:
+            return cached[1]
+        # Server sent 304 but our cache is gone (race/protocol-violation) —
+        # retry without If-None-Match so we get a real body back.
+        headers.pop("If-None-Match", None)
+        resp = _get(url, params=params, headers=headers, timeout=timeout)
+        status = resp.status_code
 
     # 429 or secondary-limit 403: trip cooldown and raise.
     if status == 429 or (
@@ -3411,10 +3418,17 @@ class UpdateChecker:
 
             download_url = asset["browser_download_url"]
             expected_size = asset.get("size") or 0
+            # GitHub Releases API exposes a "digest" field like "sha256:HEX"
+            # on assets uploaded after ~2024. Verify when present; skip when not.
+            expected_digest = asset.get("digest") or ""
+            expected_sha256 = ""
+            if expected_digest.startswith("sha256:"):
+                expected_sha256 = expected_digest.split(":", 1)[1].lower()
             current_exe = Path(sys.executable)
             tmp_path = current_exe.with_suffix(".update")
 
             bytes_written = 0
+            hasher = hashlib.sha256() if expected_sha256 else None
             if progress_cb:
                 progress_cb(0, expected_size)
             with requests.get(download_url, stream=True, timeout=120) as dl:
@@ -3422,6 +3436,8 @@ class UpdateChecker:
                 with open(tmp_path, "wb") as f:
                     for chunk in dl.iter_content(chunk_size=65536):
                         f.write(chunk)
+                        if hasher:
+                            hasher.update(chunk)
                         bytes_written += len(chunk)
                         if progress_cb:
                             progress_cb(bytes_written, expected_size)
@@ -3434,6 +3450,18 @@ class UpdateChecker:
                 return False, (
                     f"Download size mismatch (got {bytes_written}, expected {expected_size})"
                 )
+
+            if hasher:
+                actual_sha256 = hasher.hexdigest()
+                if actual_sha256 != expected_sha256:
+                    try:
+                        tmp_path.unlink(missing_ok=True)
+                    except OSError:
+                        pass
+                    return False, (
+                        f"Checksum mismatch (got {actual_sha256[:12]}…, "
+                        f"expected {expected_sha256[:12]}…)"
+                    )
 
             if not IS_WINDOWS:
                 tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IEXEC)
@@ -4334,6 +4362,36 @@ class MainWindow(QMainWindow):
                 self._sort_section(title)
                 break
 
+    @staticmethod
+    def _sort_key_changed(prev, new, sort_mode: Optional[str]) -> bool:
+        """Return True when the field backing `sort_mode` differs between states.
+
+        Skips expensive re-sorts on polls where nothing sort-relevant moved
+        (most common case: a row already-green stays green across polls).
+        """
+        if not sort_mode or prev is None or new is None:
+            return True
+        if sort_mode.startswith("status_"):
+            return prev.status != new.status
+        if sort_mode.startswith("updated_"):
+            pk = (prev.run_updated_at or prev.started_at or "")
+            nk = (new.run_updated_at  or new.started_at  or "")
+            return pk != nk
+        if sort_mode.startswith("created_"):
+            return (prev.started_at or "") != (new.started_at or "")
+        return True
+
+    def _maybe_resort_section_for_wid(self, wid: int, prev, new):
+        container = self._wid_container.get(wid)
+        if not container:
+            return
+        for title, content in self._section_content.items():
+            if content is container:
+                mode = self._section_sort.get(title)
+                if mode and self._sort_key_changed(prev, new, mode):
+                    self._sort_section(title)
+                break
+
     def _destroy_sections(self):
         for sec in self._sections:
             sec.setParent(None)
@@ -4508,6 +4566,8 @@ class MainWindow(QMainWindow):
             row = self._rows.get(key)
             if row:
                 row.update(event.new_state, poll_rate, jira_base_url=jira_url)
+                # Only re-sort when the active sort's backing field changed.
+                self._maybe_resort_section_for_wid(event.workflow_id, prev, event.new_state)
             elif event.sub_key is not None:
                 container = self._wid_container.get(event.workflow_id, self._scroll_content)
                 content_layout = self._section_content_layout.get(
@@ -4522,7 +4582,8 @@ class MainWindow(QMainWindow):
                 if key in self._snoozed:
                     new_row.set_snoozed(True)
                 self._rows[key] = new_row
-            self._resort_section_for_wid(event.workflow_id)
+                # New row needs placement — unconditional resort.
+                self._resort_section_for_wid(event.workflow_id)
 
         self._update_tray()
 
