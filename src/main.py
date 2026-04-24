@@ -202,6 +202,8 @@ _SUMMIT_LOGO_B64 = (
 CONFIG_FILE    = _APP_DIR / "config.yaml"
 STATE_FILE     = _APP_DIR / "state.json"
 APP_ICO        = _APP_DIR / "app.ico"
+_CHECK_PNG     = _APP_DIR / "_check.png"
+_CHECK_PNG_URL = _CHECK_PNG.as_posix()  # QSS requires forward slashes on Windows
 _FOCUS_VBS     = _APP_DIR / "_focus.vbs"
 _FOCUS_SIGNAL  = _APP_DIR / "_focus_signal"
 
@@ -2993,6 +2995,27 @@ def _generate_app_ico() -> None:
         print(f"[Icon] Generate error: {exc}")
 
 
+def _generate_check_glyph() -> None:
+    """Generate a white check-mark PNG used as the QCheckBox indicator image
+    in the dark-theme stylesheet. Rendered at 4x supersample + LANCZOS for
+    clean edges at 14x14 display size. Regenerated every startup."""
+    try:
+        size, scale = 14, 4
+        hi = size * scale
+        img = Image.new("RGBA", (hi, hi), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        sw = max(2, int(hi * 0.16))
+        pts = [
+            (hi * 0.22, hi * 0.54),
+            (hi * 0.44, hi * 0.74),
+            (hi * 0.80, hi * 0.30),
+        ]
+        draw.line(pts, fill="#FFFFFF", width=sw, joint="curve")
+        img.resize((size, size), Image.LANCZOS).save(str(_CHECK_PNG), format="PNG")
+    except Exception as exc:
+        print(f"[Check glyph] Generate error: {exc}")
+
+
 def _worst_status(statuses: set[str]) -> str:
     """Return the highest-priority status from a set (failure > running > queued > success)."""
     if ST_FAILURE  in statuses: return ST_FAILURE
@@ -3981,8 +4004,20 @@ DARK_STYLESHEET = f"""
     QScrollBar::handle:vertical:hover {{ background: {FG_MUTED}; }}
     QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}
     QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{ background: none; }}
-    QCheckBox {{ color: {FG_MUTED}; font-size: 11px; spacing: 4px; }}
-    QCheckBox::indicator {{ width: 14px; height: 14px; }}
+    QCheckBox {{ color: {FG_MUTED}; font-size: 11px; spacing: 6px; }}
+    QCheckBox::indicator {{
+        width: 14px; height: 14px;
+        border: 1px solid #57534E;
+        border-radius: 3px;
+        background-color: {BG_DARK};
+    }}
+    QCheckBox::indicator:hover {{ border-color: {FG_LINK}; }}
+    QCheckBox::indicator:checked {{
+        background-color: {FG_LINK};
+        border-color: {FG_LINK};
+        image: url({_CHECK_PNG_URL});
+    }}
+    QCheckBox::indicator:checked:hover {{ background-color: #F59E0B; border-color: #F59E0B; }}
     QToolTip {{
         background-color: #292524; color: {FG_TEXT}; border: 1px solid #44403C;
         font-size: 11px; padding: 4px 6px;
@@ -4183,7 +4218,7 @@ class MainWindow(QMainWindow):
         # Footer row 1 — checkboxes
         row1 = QWidget()
         row1_layout = QHBoxLayout(row1)
-        row1_layout.setContentsMargins(14, 10, 14, 6)
+        row1_layout.setContentsMargins(14, 14, 14, 6)
         row1_layout.setSpacing(18)
 
         state = self._load_state()
@@ -5033,6 +5068,7 @@ def main():
         _ensure_focus_vbs()
 
     app = QApplication(sys.argv)
+    _generate_check_glyph()
     app.setStyleSheet(DARK_STYLESHEET)
 
     # Warn about missing Linux sound tools

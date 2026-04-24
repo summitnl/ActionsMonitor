@@ -19,6 +19,9 @@ _focus.vbs
 _focus.sh
 _focus_signal
 
+# Generated checkbox glyph (PIL-rendered at startup for QSS indicator image)
+_check.png
+
 # PyInstaller build artifacts
 build/
 dist/
