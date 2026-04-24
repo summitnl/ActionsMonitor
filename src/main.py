@@ -597,6 +597,45 @@ def _cached_review_fetch(url: str, token: str, session: Optional[requests.Sessio
         return cached[0] if cached else None
 
 
+# GraphQL query — counts unresolved review threads for a single PR.
+# REST doesn't expose `isResolved`, so GraphQL is required here.
+_UNRESOLVED_THREADS_QUERY = """
+query($owner:String!,$repo:String!,$num:Int!){
+  repository(owner:$owner,name:$repo){
+    pullRequest(number:$num){
+      reviewThreads(first:100){nodes{isResolved}}
+    }
+  }
+}
+"""
+
+
+def _cached_unresolved_fetch(owner: str, repo: str, pr_number: int, token: str,
+                             session: Optional[requests.Session],
+                             cache: dict, key, ttl: float) -> int:
+    """Fetch count of unresolved review threads for a PR with per-key TTL cache.
+    Returns stale value on API error, 0 when no prior value exists."""
+    cached = cache.get(key)
+    if cached is not None:
+        count, fetch_time = cached
+        if time.monotonic() - fetch_time < ttl:
+            return count
+    try:
+        data = _github_graphql_post(
+            _UNRESOLVED_THREADS_QUERY,
+            {"owner": owner, "repo": repo, "num": pr_number},
+            token, session,
+        )
+        pr = (data.get("repository") or {}).get("pullRequest") or {}
+        nodes = ((pr.get("reviewThreads") or {}).get("nodes")) or []
+        count = sum(1 for n in nodes if not n.get("isResolved"))
+        cache[key] = (count, time.monotonic())
+        _prune_cache(cache, _REVIEW_CACHE_MAX)
+        return count
+    except Exception:
+        return cached[0] if cached else 0
+
+
 # Cache caps — prevent unbounded growth over long sessions
 _PR_CACHE_MAX = 200
 _REVIEW_CACHE_MAX = 200
@@ -673,6 +712,58 @@ def _set_cooldown(seconds: float, reason: str):
 def _cooldown_remaining() -> tuple[float, str]:
     with _rate_limit_lock:
         return max(0.0, _rate_limit_until - time.monotonic()), _rate_limit_reason
+
+
+def _github_graphql_post(query: str, variables: dict, token: str,
+                         session: Optional[requests.Session] = None,
+                         timeout: int = 15) -> dict:
+    """POST to GitHub's GraphQL API with the same cooldown gate + 401 handling
+    as _github_api_get. No ETag cache — GraphQL doesn't honour If-None-Match.
+    Returns the `data` payload; raises RateLimited when the cooldown is active
+    and RuntimeError when the response contains `errors`."""
+    remaining, reason = _cooldown_remaining()
+    if remaining > 0:
+        raise RateLimited(remaining, reason or "cooldown")
+
+    _post = (session or requests).post
+    resp = _post(
+        "https://api.github.com/graphql",
+        headers=_gh_headers(token),
+        json={"query": query, "variables": variables},
+        timeout=timeout,
+    )
+    status = resp.status_code
+
+    if status == 429 or (
+        status == 403
+        and "rate limit" in (resp.text or "").lower()
+    ):
+        wait = _parse_retry_after(resp)
+        _set_cooldown(wait, f"HTTP {status}")
+        raise RateLimited(wait, f"HTTP {status}")
+
+    if status == 401:
+        global _cached_github_username
+        with _github_username_lock:
+            _cached_github_username = None
+
+    resp.raise_for_status()
+    payload = resp.json()
+
+    remaining_hdr = resp.headers.get("X-RateLimit-Remaining")
+    if remaining_hdr is not None:
+        try:
+            if int(remaining_hdr) == 0:
+                reset_hdr = resp.headers.get("X-RateLimit-Reset")
+                if reset_hdr:
+                    wait = max(0.0, int(reset_hdr) - time.time())
+                    _set_cooldown(wait, "primary limit exhausted")
+        except ValueError:
+            pass
+
+    if "errors" in payload:
+        raise RuntimeError(f"GraphQL errors: {payload['errors']}")
+    return payload.get("data") or {}
 
 
 def fetch_latest_run(
@@ -838,6 +929,7 @@ class WorkflowState:
     staleness_level: Optional[str] = None  # "slightly_stale" | "moderately_stale" | "very_stale"
     pr_updated_at:   Optional[str] = None  # ISO 8601 from GitHub PR API
     has_conflict:    bool = False          # True when PR mergeable_state == "dirty"
+    unresolved_threads: int = 0            # count of unresolved review threads (GraphQL)
 
 
 # ---------------------------------------------------------------------------
@@ -1294,6 +1386,9 @@ class PRWorkflowPoller(WorkflowPoller):
         # Mergeable state cache: pr_number → (has_conflict, fetch_time)
         self._mergeable_cache: dict[int, tuple[bool, float]] = {}
         self._mergeable_cache_ttl: float = 120.0
+        # Unresolved review threads cache: pr_number → (count, fetch_time)
+        self._unresolved_cache: dict[int, tuple[int, float]] = {}
+        self._unresolved_cache_ttl: float = 120.0
         # Short TTL cache on top of the global ETag layer — skips issuing the
         # per-branch runs HTTP call entirely on rapid successive polls (manual
         # refresh bursts, overlapping workflows). Keyed by (wf_file, branch).
@@ -1574,6 +1669,7 @@ class PRWorkflowPoller(WorkflowPoller):
                     state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
                     state.review_status = self._fetch_pr_review_status(pr_num, token)
                     state.has_conflict  = self._fetch_pr_mergeable(pr_num, token)
+                    state.unresolved_threads = self._fetch_pr_unresolved_threads(pr_num, token)
 
                     # Compute PR staleness from updated_at
                     updated_at_str = self._pr_cache.get(pr_num, {}).get("updated_at", "")
@@ -1699,6 +1795,7 @@ class PRWorkflowPoller(WorkflowPoller):
             self._pr_cache.pop(pr_num, None)
             self._review_cache.pop(pr_num, None)
             self._mergeable_cache.pop(pr_num, None)
+            self._unresolved_cache.pop(pr_num, None)
 
     @staticmethod
     def _pr_num_from_sub_key(sk: str) -> Optional[int]:
@@ -1746,6 +1843,13 @@ class PRWorkflowPoller(WorkflowPoller):
             return result
         except Exception:
             return cached[0] if cached else False
+
+    def _fetch_pr_unresolved_threads(self, pr_number: int, token: str) -> int:
+        """Count unresolved review threads via GraphQL, cached for _unresolved_cache_ttl."""
+        return _cached_unresolved_fetch(
+            self.owner, self.repo, pr_number, token, self._session,
+            self._unresolved_cache, pr_number, self._unresolved_cache_ttl,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1929,6 +2033,8 @@ class URLQueryPoller(WorkflowPoller):
         self._pr_cache: dict[tuple[str, str, int], dict] = {}
         self._review_cache: dict[tuple[str, str, int], tuple[Optional[str], float]] = {}
         self._review_cache_ttl: float = 120.0
+        self._unresolved_cache: dict[tuple[str, str, int], tuple[int, float]] = {}
+        self._unresolved_cache_ttl: float = 120.0
         self._staleness_thresholds = PRWorkflowPoller._parse_staleness(config_mgr.get())
 
     def _poll(self):
@@ -2048,6 +2154,7 @@ class URLQueryPoller(WorkflowPoller):
             state.is_draft      = (pr_detail or {}).get("draft", bool(item.get("draft", False)))
             state.review_status = review_status
             state.has_conflict  = (pr_detail or {}).get("mergeable_state") == "dirty"
+            state.unresolved_threads = self._fetch_unresolved_threads(owner, repo, pr_num, token)
 
             updated_at_str = item.get("updated_at", "")
             if updated_at_str:
@@ -2103,6 +2210,12 @@ class URLQueryPoller(WorkflowPoller):
             self._review_cache, (owner, repo, pr_num), self._review_cache_ttl,
         )
 
+    def _fetch_unresolved_threads(self, owner: str, repo: str, pr_num: int, token: str) -> int:
+        return _cached_unresolved_fetch(
+            owner, repo, pr_num, token, self._session,
+            self._unresolved_cache, (owner, repo, pr_num), self._unresolved_cache_ttl,
+        )
+
     def _remove_sub_key(self, sk: str):
         super()._remove_sub_key(sk)
         self._last_seen.pop(sk, None)
@@ -2112,6 +2225,7 @@ class URLQueryPoller(WorkflowPoller):
             pr_num = int(pr_str)
             self._pr_cache.pop((owner, repo, pr_num), None)
             self._review_cache.pop((owner, repo, pr_num), None)
+            self._unresolved_cache.pop((owner, repo, pr_num), None)
         except (ValueError, IndexError):
             pass
 
@@ -3037,6 +3151,10 @@ class WorkflowRow(QWidget):
         self._conflict_lbl.setToolTip("This PR has merge conflicts that must be resolved")
         badge_layout.addWidget(self._conflict_lbl)
 
+        self._unresolved_lbl = _make_badge("", "#4A1D1D", "#FCA5A5", bold=True)
+        self._unresolved_lbl.setToolTip("Unresolved review threads on this PR")
+        badge_layout.addWidget(self._unresolved_lbl)
+
         self._jira_lbl = _make_badge("", "#302830", "#A78BFA")
         self._jira_lbl.setCursor(Qt.CursorShape.PointingHandCursor)
         self._jira_lbl.mousePressEvent = lambda e: self._open_jira()
@@ -3162,6 +3280,7 @@ class WorkflowRow(QWidget):
         self._prefix_lbl.setStyleSheet(self._badge_css("#3D3530", "#FBBF24"))
         self._draft_lbl.setStyleSheet(self._badge_css("#92400E", "#FEF3C7", bold=True))
         self._conflict_lbl.setStyleSheet(self._badge_css("#7F1D1D", "#FEE2E2", bold=True))
+        self._unresolved_lbl.setStyleSheet(self._badge_css("#4A1D1D", "#FCA5A5", bold=True))
         self._jira_lbl.setStyleSheet(self._badge_css("#302830", "#A78BFA"))
 
     def _open_jira(self):
@@ -3230,6 +3349,13 @@ class WorkflowRow(QWidget):
             if s.has_conflict:
                 has_badges = True
 
+            if s.unresolved_threads > 0:
+                self._unresolved_lbl.setText(f"{s.unresolved_threads} UNRESOLVED")
+                self._unresolved_lbl.setVisible(True)
+                has_badges = True
+            else:
+                self._unresolved_lbl.setVisible(False)
+
             if s.jira_key and self._jira_base_url:
                 self._jira_lbl.setText(s.jira_key)
                 self._jira_lbl.setVisible(True)
@@ -3269,6 +3395,7 @@ class WorkflowRow(QWidget):
             self._prefix_lbl.setVisible(False)
             self._draft_lbl.setVisible(False)
             self._conflict_lbl.setVisible(False)
+            self._unresolved_lbl.setVisible(False)
             self._jira_lbl.setVisible(False)
             self._review_lbl.setVisible(False)
             self._stale_lbl.setVisible(False)
