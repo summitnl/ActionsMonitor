@@ -344,7 +344,7 @@ DEFAULT_CONFIG: dict = {
     "github_token": "",
     "bot_pattern": r"\[bot\]$",
     "notifications": {
-        "batch_window": 3,
+        "batch_window": 1,
         "max_notification_age": "1h",
         "new_run":  {"enabled": True,  "sound": "default" if IS_LINUX else "whistle"},
         "failure":  {"enabled": True,  "sound": "default"},
@@ -4792,7 +4792,7 @@ class MainWindow(QMainWindow):
     def _start_pollers(self):
         cfg = self._config_mgr.get()
         notif_cfg = cfg.get("notifications", {})
-        NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 3)))
+        NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 1)))
         workflows = cfg.get("workflows") or []
 
         self._wid_stable_keys = {

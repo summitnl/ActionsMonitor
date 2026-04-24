@@ -60,7 +60,7 @@ github_token: ""
 notifications:
   # Seconds to wait before sending notifications, allowing multiple to be
   # combined into one toast + sound. Set to 0 to disable (immediate, old behavior).
-  batch_window: 3
+  batch_window: 1
 
   # Suppress notifications older than this duration. Prevents a flood of stale
   # notifications after waking from sleep. Use duration strings like "1h", "30m",
