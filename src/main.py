@@ -3912,9 +3912,12 @@ class UpdateChecker:
 class UpdateDialog(QDialog):
     """Modal dark-themed update dialog."""
 
-    # Signal emitted from the download thread so progress updates land on
-    # the Qt main thread via Qt's auto queued-connection semantics.
+    # Signals emitted from the download thread so updates land on the Qt
+    # main thread via Qt's auto queued-connection semantics. Using Signal
+    # is required for both progress and result — QTimer.singleShot from a
+    # thread without a Qt event loop silently never fires.
     _progress = Signal(int, int)
+    _result   = Signal(bool, str)
 
     def __init__(self, commit_hash: str, parent=None):
         super().__init__(parent)
@@ -3970,6 +3973,7 @@ class UpdateDialog(QDialog):
         self._progress_bar.hide()
         layout.addWidget(self._progress_bar)
         self._progress.connect(self._on_progress)
+        self._result.connect(self._on_result)
 
         layout.addStretch()
 
@@ -4012,7 +4016,7 @@ class UpdateDialog(QDialog):
 
         def _run():
             ok, msg = UpdateChecker.apply_update(progress_cb=self._progress.emit)
-            QTimer.singleShot(0, lambda: self._on_result(ok, msg))
+            self._result.emit(ok, msg)
 
         threading.Thread(target=_run, daemon=True).start()
 
