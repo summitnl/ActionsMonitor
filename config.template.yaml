@@ -33,6 +33,26 @@ github_token: ""
 # and shown as clickable badges on PR and actor-mode rows.
 # jira_base_url: "https://mycompany.atlassian.net"
 
+# Optional: Regex used to classify PR reviewers as bots.
+#
+# The APPROVED and CHANGES REQUESTED review badges render a small icon
+# indicating whether the winning reviewer is a bot (robot glyph) or a
+# human (person glyph). A reviewer is a bot when their GitHub login
+# matches this regex. When a bot AND a human both contributed the winning
+# state, the human icon is shown (human wins).
+#
+# The default matches GitHub's canonical App suffix only, e.g.
+# "github-actions[bot]", "dependabot[bot]", "renovate[bot]". Override
+# this if your organisation uses bot accounts with a different naming
+# scheme — e.g. a plain username ending in "-bot", or a shared service
+# account. An invalid regex silently falls back to the default.
+#
+# Examples:
+#   bot_pattern: "\\[bot\\]$"              # default: strict GitHub App suffix
+#   bot_pattern: "(?i)(\\[bot\\]|-bot$)"   # also matches "deploy-bot", case-insensitive
+#   bot_pattern: "(?i)bot"                 # permissive: any login containing "bot"
+# bot_pattern: "\\[bot\\]$"
+
 # =============================================================================
 # Global Notification Settings
 # These apply to all workflows unless overridden per-workflow below.

@@ -29,6 +29,7 @@ from typing import Optional
 from urllib.parse import urlparse, parse_qs, unquote
 import stat
 import base64
+import functools
 import hashlib
 import io
 import tempfile
@@ -341,6 +342,7 @@ if WINOTIFY_AVAILABLE:
 # ---------------------------------------------------------------------------
 DEFAULT_CONFIG: dict = {
     "github_token": "",
+    "bot_pattern": r"\[bot\]$",
     "notifications": {
         "batch_window": 3,
         "max_notification_age": "1h",
@@ -563,8 +565,27 @@ def _github_api_get(url: str, token: str, session: Optional[requests.Session] = 
     return data
 
 
-def _aggregate_review_status(reviews: list[dict]) -> str:
-    """Collapse a PR reviews list to 'approved'/'changes_requested'/'commented'/'pending'."""
+_DEFAULT_BOT_PATTERN = r"\[bot\]$"
+
+
+@functools.lru_cache(maxsize=8)
+def _compile_bot_regex(pattern: str) -> re.Pattern:
+    """Compile bot-detection regex; silently fall back to default on bad input."""
+    try:
+        return re.compile(pattern or _DEFAULT_BOT_PATTERN)
+    except re.error:
+        return re.compile(_DEFAULT_BOT_PATTERN)
+
+
+def _aggregate_review_status(reviews: list[dict],
+                             bot_regex: Optional[re.Pattern] = None) -> tuple[str, bool]:
+    """Collapse a PR reviews list to (status, by_bot).
+
+    status ∈ 'approved' | 'changes_requested' | 'commented' | 'pending'.
+    by_bot is True iff every reviewer whose latest state equals the winning state
+    matches bot_regex. Human wins on mixed reviewers. Always False for
+    commented/pending.
+    """
     latest: dict[str, str] = {}
     has_comments = False
     for r in reviews:
@@ -575,28 +596,34 @@ def _aggregate_review_status(reviews: list[dict]) -> str:
         elif state == "COMMENTED":
             has_comments = True
     if not latest:
-        return "commented" if has_comments else "pending"
-    if "CHANGES_REQUESTED" in latest.values():
-        return "changes_requested"
-    return "approved"
+        return ("commented" if has_comments else "pending", False)
+    winning = "CHANGES_REQUESTED" if "CHANGES_REQUESTED" in latest.values() else "APPROVED"
+    status = "changes_requested" if winning == "CHANGES_REQUESTED" else "approved"
+    if bot_regex is None:
+        return (status, False)
+    winners = [u for u, st in latest.items() if st == winning]
+    by_bot = bool(winners) and all(bot_regex.search(u) for u in winners)
+    return (status, by_bot)
 
 
 def _cached_review_fetch(url: str, token: str, session: Optional[requests.Session],
-                         cache: dict, key, ttl: float) -> Optional[str]:
+                         cache: dict, key, ttl: float,
+                         bot_regex: Optional[re.Pattern] = None
+                         ) -> tuple[Optional[str], bool]:
     """Fetch+aggregate PR review status with per-key TTL cache. Returns stale value on API error."""
     cached = cache.get(key)
     if cached is not None:
-        status, fetch_time = cached
+        value, fetch_time = cached
         if time.monotonic() - fetch_time < ttl:
-            return status
+            return value
     try:
         reviews = _github_api_get(url, token, session)
-        result = _aggregate_review_status(reviews)
+        result = _aggregate_review_status(reviews, bot_regex)
         cache[key] = (result, time.monotonic())
         _prune_cache(cache, _REVIEW_CACHE_MAX)
         return result
     except Exception:
-        return cached[0] if cached else None
+        return cached[0] if cached else (None, False)
 
 
 # GraphQL query — counts unresolved review threads for a single PR.
@@ -926,6 +953,7 @@ class WorkflowState:
     pr_url:        Optional[str] = None
     is_draft:      bool = False
     review_status: Optional[str] = None   # "approved" | "changes_requested" | "commented" | "pending" | None
+    review_by_bot: bool = False           # True iff winning reviewer(s) all match bot regex
     pr_target:     Optional[str] = None   # target branch (e.g. "acceptance", "production")
     jira_key:      Optional[str] = None
     staleness_level: Optional[str] = None  # "slightly_stale" | "moderately_stale" | "very_stale"
@@ -1427,6 +1455,7 @@ class PRWorkflowPoller(WorkflowPoller):
         cfg   = self.config_mgr.get()
         token = cfg.get("github_token", "")
         notif_cfg = cfg.get("notifications", {})
+        bot_regex = _compile_bot_regex(cfg.get("bot_pattern", _DEFAULT_BOT_PATTERN))
 
         # Refresh staleness thresholds from config (cheap parse, avoids stale cache)
         self._staleness_thresholds = self._parse_staleness(cfg)
@@ -1669,7 +1698,8 @@ class PRWorkflowPoller(WorkflowPoller):
                     if not state.pr_target:
                         state.pr_target = cached.get("base_ref", "")
                     state.pr_url = f"https://github.com/{self.owner}/{self.repo}/pull/{pr_num}"
-                    state.review_status = self._fetch_pr_review_status(pr_num, token)
+                    state.review_status, state.review_by_bot = self._fetch_pr_review_status(
+                        pr_num, token, bot_regex)
                     state.has_conflict  = self._fetch_pr_mergeable(pr_num, token)
                     state.unresolved_threads = self._fetch_pr_unresolved_threads(pr_num, token)
 
@@ -1809,10 +1839,12 @@ class PRWorkflowPoller(WorkflowPoller):
                 pass
         return None
 
-    def _fetch_pr_review_status(self, pr_number: int, token: str) -> Optional[str]:
+    def _fetch_pr_review_status(self, pr_number: int, token: str,
+                                bot_regex: Optional[re.Pattern] = None
+                                ) -> tuple[Optional[str], bool]:
         """Fetch the aggregate review status for a PR.
-        Returns 'approved', 'changes_requested', 'commented', 'pending', or None.
-        Cached for _review_cache_ttl seconds to reduce API calls."""
+        Returns (status, by_bot) where status ∈ {'approved','changes_requested',
+        'commented','pending', None}. Cached for _review_cache_ttl seconds."""
         url = (
             f"https://api.github.com/repos/{self.owner}/{self.repo}"
             f"/pulls/{pr_number}/reviews"
@@ -1820,6 +1852,7 @@ class PRWorkflowPoller(WorkflowPoller):
         return _cached_review_fetch(
             url, token, self._session,
             self._review_cache, pr_number, self._review_cache_ttl,
+            bot_regex,
         )
 
     def _fetch_pr_mergeable(self, pr_number: int, token: str) -> bool:
@@ -2042,6 +2075,7 @@ class URLQueryPoller(WorkflowPoller):
     def _poll(self):
         cfg = self.config_mgr.get()
         token = cfg.get("github_token", "")
+        bot_regex = _compile_bot_regex(cfg.get("bot_pattern", _DEFAULT_BOT_PATTERN))
 
         if not self.query:
             self._emit_error("No 'query' configured for URL mode")
@@ -2131,7 +2165,8 @@ class URLQueryPoller(WorkflowPoller):
                 continue
 
             pr_detail     = self._fetch_pr_detail(owner, repo, pr_num, token)
-            review_status = self._fetch_review_status(owner, repo, pr_num, token)
+            review_status, review_by_bot = self._fetch_review_status(
+                owner, repo, pr_num, token, bot_regex)
 
             row_status = ST_UNKNOWN
             if review_status == "approved":
@@ -2155,6 +2190,7 @@ class URLQueryPoller(WorkflowPoller):
             state.pr_target     = (pr_detail or {}).get("base_ref", "")
             state.is_draft      = (pr_detail or {}).get("draft", bool(item.get("draft", False)))
             state.review_status = review_status
+            state.review_by_bot = review_by_bot
             state.has_conflict  = (pr_detail or {}).get("mergeable_state") == "dirty"
             state.unresolved_threads = self._fetch_unresolved_threads(owner, repo, pr_num, token)
 
@@ -2205,11 +2241,14 @@ class URLQueryPoller(WorkflowPoller):
         _prune_cache(self._pr_cache, _PR_CACHE_MAX)
         return detail
 
-    def _fetch_review_status(self, owner: str, repo: str, pr_num: int, token: str) -> Optional[str]:
+    def _fetch_review_status(self, owner: str, repo: str, pr_num: int, token: str,
+                             bot_regex: Optional[re.Pattern] = None
+                             ) -> tuple[Optional[str], bool]:
         url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_num}/reviews"
         return _cached_review_fetch(
             url, token, self._session,
             self._review_cache, (owner, repo, pr_num), self._review_cache_ttl,
+            bot_regex,
         )
 
     def _fetch_unresolved_threads(self, owner: str, repo: str, pr_num: int, token: str) -> int:
@@ -2444,6 +2483,74 @@ def _make_help_icon(size: int = 16, colour: str = FG_LINK) -> Image.Image:
     ty = (hi - th) / 2 - bbox[1]
     draw.text((tx, ty), "?", fill=colour, font=font)
     return img.resize((size, size), Image.LANCZOS)
+
+
+# --- Reviewer icons (Lucide user + bot), rendered inline inside review badges ---
+
+def _make_user_icon(size: int, colour: str) -> Image.Image:
+    """Lucide user icon: circle head + bust arc. No background."""
+    img, draw, hi = _icon_base(size)
+    sw = max(2, round(hi / 24 * 2.2))
+    cx = hi / 2
+    head_cy = hi * 0.33
+    head_r  = hi * 0.20
+    draw.ellipse([cx - head_r, head_cy - head_r,
+                  cx + head_r, head_cy + head_r],
+                 outline=colour, width=sw)
+    bust_r  = hi * 0.40
+    bust_cy = hi * 1.00
+    draw.arc([cx - bust_r, bust_cy - bust_r,
+              cx + bust_r, bust_cy + bust_r],
+             start=180, end=360, fill=colour, width=sw)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+def _make_bot_icon(size: int, colour: str) -> Image.Image:
+    """Lucide bot icon: antenna + rounded-rect head + two eyes. No background."""
+    img, draw, hi = _icon_base(size)
+    sw = max(2, round(hi / 24 * 2.0))
+    cx = hi / 2
+    top = hi * 0.10
+    antenna_end = hi * 0.26
+    draw.line([(cx, top), (cx, antenna_end)], fill=colour, width=sw)
+    dot_r = max(sw * 0.7, 1.5)
+    draw.ellipse([cx - dot_r, top - dot_r, cx + dot_r, top + dot_r], fill=colour)
+    head_left  = hi * 0.16
+    head_right = hi * 0.84
+    head_top   = antenna_end + sw
+    head_bot   = hi * 0.84
+    try:
+        draw.rounded_rectangle(
+            [head_left, head_top, head_right, head_bot],
+            radius=hi * 0.13, outline=colour, width=sw,
+        )
+    except AttributeError:
+        draw.rectangle([head_left, head_top, head_right, head_bot],
+                       outline=colour, width=sw)
+    eye_cy = (head_top + head_bot) / 2
+    eye_r  = max(hi * 0.055, 1.5)
+    for ex in (cx - hi * 0.15, cx + hi * 0.15):
+        draw.ellipse([ex - eye_r, eye_cy - eye_r,
+                      ex + eye_r, eye_cy + eye_r], fill=colour)
+    return img.resize((size, size), Image.LANCZOS)
+
+
+_REVIEWER_ICON_B64: dict[tuple[str, str, int], str] = {}
+
+
+def _reviewer_icon_b64(kind: str, colour: str, px: int = 12) -> str:
+    """Render reviewer glyph at `px` pixels in `colour`, return base64 PNG.
+    kind: 'bot' | 'user'. Cached per (kind, colour, px)."""
+    key = (kind, colour, px)
+    cached = _REVIEWER_ICON_B64.get(key)
+    if cached is not None:
+        return cached
+    img = _make_bot_icon(px, colour) if kind == "bot" else _make_user_icon(px, colour)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    data = base64.b64encode(buf.getvalue()).decode("ascii")
+    _REVIEWER_ICON_B64[key] = data
+    return data
 
 
 # --- Snooze button icon (bell / bell-off) ---
@@ -3077,7 +3184,7 @@ def _make_badge(text: str, bg: str, fg: str, bold: bool = False) -> QLabel:
     weight = "bold" if bold else "normal"
     lbl.setStyleSheet(
         f"background-color: {bg}; color: {fg}; font-size: 9px; font-weight: {weight}; "
-        f"padding: 0px 3px; border-radius: 2px;"
+        f"padding: 1px 3px; border-radius: 2px;"
     )
     lbl.setVisible(False)
     return lbl
@@ -3184,6 +3291,7 @@ class WorkflowRow(QWidget):
         badge_layout.addWidget(self._jira_lbl)
 
         self._review_lbl = _make_badge("", "#3D3530", "#FBBF24")
+        self._review_lbl.setTextFormat(Qt.RichText)
         badge_layout.addWidget(self._review_lbl)
 
         self._stale_lbl = _make_badge("", "#3D3520", "#EAB308", bold=True)
@@ -3297,7 +3405,7 @@ class WorkflowRow(QWidget):
             bg, fg = "#2C2825", "#57534E"
         weight = "bold" if bold else "normal"
         return (f"background-color: {bg}; color: {fg}; font-size: 9px; "
-                f"font-weight: {weight}; padding: 0px 3px; border-radius: 2px;")
+                f"font-weight: {weight}; padding: 1px 3px; border-radius: 2px;")
 
     def _restyle_static_badges(self):
         self._prefix_lbl.setStyleSheet(self._badge_css("#3D3530", "#FBBF24"))
@@ -3389,12 +3497,24 @@ class WorkflowRow(QWidget):
             if s.review_status:
                 text, bg_col, fg_col = _REVIEW_BADGE_CFG.get(
                     s.review_status, ("REVIEW PENDING", "#3D3530", "#FBBF24"))
-                self._review_lbl.setText(text)
+                if s.review_status in ("approved", "changes_requested"):
+                    kind = "bot" if s.review_by_bot else "user"
+                    b64 = _reviewer_icon_b64(kind, fg_col, 12)
+                    html = (f"<img src='data:image/png;base64,{b64}' "
+                            f"width='11' height='11' "
+                            f"style='vertical-align:middle' />&nbsp;{text}")
+                    self._review_lbl.setText(html)
+                    self._review_lbl.setToolTip(
+                        "Reviewed by bot" if s.review_by_bot else "Reviewed by human")
+                else:
+                    self._review_lbl.setText(text)
+                    self._review_lbl.setToolTip("")
                 self._review_lbl.setStyleSheet(self._badge_css(bg_col, fg_col))
                 self._review_lbl.setVisible(True)
                 has_badges = True
             else:
                 self._review_lbl.setVisible(False)
+                self._review_lbl.setToolTip("")
 
             if s.staleness_level and s.pr_updated_at:
                 bg_col, fg_col = _STALENESS_BADGE_CFG.get(s.staleness_level, ("#3D3520", "#EAB308"))
