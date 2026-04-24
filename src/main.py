@@ -4194,15 +4194,15 @@ class MainWindow(QMainWindow):
             self._startup_cb.toggled.connect(self._toggle_startup)
             row1_layout.addWidget(self._startup_cb)
 
-        self._aot_cb = QCheckBox("Always on top")
-        self._aot_cb.setChecked(state.get("always_on_top", False))
-        self._aot_cb.toggled.connect(self._toggle_always_on_top)
-        row1_layout.addWidget(self._aot_cb)
-
         self._min_tray_cb = QCheckBox("Minimize to tray on close")
         self._min_tray_cb.setChecked(state.get("minimize_to_tray", True))
         self._min_tray_cb.toggled.connect(self._toggle_minimize_to_tray)
         row1_layout.addWidget(self._min_tray_cb)
+
+        self._aot_cb = QCheckBox("Always on top")
+        self._aot_cb.setChecked(state.get("always_on_top", False))
+        self._aot_cb.toggled.connect(self._toggle_always_on_top)
+        row1_layout.addWidget(self._aot_cb)
 
         row1_layout.addStretch()
         footer_layout.addWidget(row1)
