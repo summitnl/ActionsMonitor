@@ -1,10 +1,10 @@
 {
-  "version": "2026.04.24.2",
+  "version": "2026.04.25",
   "description": "Desktop monitor for GitHub Actions workflows and pull requests.",
   "homepage": "https://github.com/summitnl/ActionsMonitor",
   "license": "Summit Free Use License",
-  "url": "https://github.com/summitnl/ActionsMonitor/releases/download/v2026.04.24.2/ActionsMonitor.exe",
-  "hash": "8DAF3337F0BA36AD33956F23D490D58DF16DB1CA19D15EC25F554B37F730FEED",
+  "url": "https://github.com/summitnl/ActionsMonitor/releases/download/v2026.04.25/ActionsMonitor.exe",
+  "hash": "988AA89E5918D4CE73DDBCECEF93342576BB2E69CDE02110DCF0EA1AD38121EC",
   "bin": "ActionsMonitor.exe",
   "shortcuts": [
     [
