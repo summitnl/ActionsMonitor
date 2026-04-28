@@ -3380,8 +3380,21 @@ def _load_wizx20_mark(height: int) -> "Image.Image":
 # --- App / tray icon (WizX20 bolt mark on dark rounded rect + status dot) ---
 
 def _make_base_icon(size: int = 64) -> Image.Image:
-    """App icon: WizX20 bolt mark on dark rounded-rect background."""
+    """App icon: WizX20 bolt mark on dark rounded-rect background.
+    At ≤32px the full mark fuses into a blob, so a simplified amber ">" chevron
+    is drawn instead — readable in toasts and the taskbar."""
     img, draw, hi = _icon_base(size)
+
+    if size <= 32:
+        # Simplified amber chevron, no chrome — fills the icon area cleanly.
+        cx, cy = hi // 2, hi // 2
+        arm = int(hi * 0.35)
+        sw = max(2, int(hi * 0.18))
+        tip = (cx + arm // 2, cy)
+        top = (cx - arm // 2, cy - arm)
+        bot = (cx - arm // 2, cy + arm)
+        draw.line([top, tip, bot], fill="#FBBF24", width=sw, joint="curve")
+        return img.resize((size, size), Image.LANCZOS)
 
     pad = hi // 16
     radius = hi // 4
@@ -4737,8 +4750,10 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
     def _setup_tray(self):
         try:
+            # Render at 32 so the simplified chevron path renders crisply when
+            # Windows scales down to 16/24px in the tray.
             self._tray_icons = {
-                s: QIcon(_pil_to_qpixmap(_make_icon_image(c))) for s, c in COLOUR.items()
+                s: QIcon(_pil_to_qpixmap(_make_icon_image(c, 32))) for s, c in COLOUR.items()
             }
             self._tray = QSystemTrayIcon(self._tray_icons[ST_UNKNOWN], self)
             tray_menu = QMenu()
