@@ -61,8 +61,6 @@ Grab `ActionsMonitor.exe` (Windows) or `ActionsMonitor-linux` from [GitHub Relea
 - **Live status** — polls your configured workflows and shows green / orange / red status indicators
 - **PR mode** — monitor your own pull request builds: one row per active PR, with branch prefix tags, PR numbers, target branch indicators, and a DRAFT indicator. When a branch has multiple PRs (e.g. hotfix → acceptance and hotfix → production), each PR gets its own row. Stale rows auto-remove after a configurable timeout
 - **System tray** — minimises to tray; tray icon colour reflects the worst combined state across all workflows
-
-  ![System tray icon](docs/systemtray.png)
 - **Toast notifications** — notified when a run starts, succeeds, or fails, with the app icon and an **Open workflow** button that takes you straight to the run
 - **Per-workflow config** — different polling rates, branch filters, and notification overrides per workflow
 - **Hot-reload** — edit `config.yaml` and the app picks up changes within seconds, no restart needed
