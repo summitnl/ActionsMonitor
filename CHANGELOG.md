@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-04-28
+
+- **Update download no longer hangs on connection close** — `UpdateChecker._apply_release_update` previously wrapped the download in `with requests.get(...) as dl`, so the function couldn't return until urllib3's `__exit__` had finished tearing down the socket. On Windows with intercepting AV / proxy stacks (NetSkope etc.) that close can stall for minutes after the body has been fully read, leaving the dialog pinned at "Downloading… 100%" even though `ActionsMonitor.update` was already on disk. Switched to an explicit `try / finally` around the response and now run `dl.close()` on a daemon thread joined with a 2 s timeout — the file write is fully done before close starts, the result signal fires immediately, and a stuck socket teardown is left to GC instead of blocking the UI.
+
 ### 2026-04-24
 
 - **Notification batch window default lowered from 3s to 1s** — toasts previously felt laggy because `notifications.batch_window` defaulted to 3 seconds: row state updated immediately on the main screen but the toast waited for the batch timer to flush. Dropped the default to 1s in both `DEFAULT_CONFIG` (`src/main.py`) and `config.template.yaml` so bursts still coalesce (a push that triggers multiple workflows lands in the same poll cycle, well within 1s) but single events fire near-immediately. Users wanting zero delay can still set `batch_window: 0`; users wanting wider coalescing can raise it.

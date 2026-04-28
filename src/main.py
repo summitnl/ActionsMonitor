@@ -3747,7 +3747,8 @@ class UpdateChecker:
             hasher = hashlib.sha256() if expected_sha256 else None
             if progress_cb:
                 progress_cb(0, expected_size)
-            with requests.get(download_url, stream=True, timeout=120) as dl:
+            dl = requests.get(download_url, stream=True, timeout=120)
+            try:
                 dl.raise_for_status()
                 with open(tmp_path, "wb") as f:
                     for chunk in dl.iter_content(chunk_size=65536):
@@ -3757,6 +3758,13 @@ class UpdateChecker:
                         bytes_written += len(chunk)
                         if progress_cb:
                             progress_cb(bytes_written, expected_size)
+            finally:
+                # Close on a worker with a short timeout — Windows AV / proxy
+                # can stall the socket teardown for minutes, leaving the
+                # dialog pinned at 100% even though the file is fully written.
+                closer = threading.Thread(target=dl.close, daemon=True)
+                closer.start()
+                closer.join(timeout=2.0)
 
             if expected_size and bytes_written != expected_size:
                 try:
