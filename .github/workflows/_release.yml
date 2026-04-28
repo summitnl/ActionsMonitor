@@ -230,7 +230,7 @@ jobs:
           TAG="${{ needs.release.outputs.version_tag }}"
           VERSION="${TAG#v}"
           HASH=$(sha256sum artifacts/ActionsMonitor.exe | awk '{print $1}' | tr '[:lower:]' '[:upper:]')
-          URL="https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
+          URL="https://github.com/WizX20/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
           jq --arg v "$VERSION" --arg h "$HASH" --arg u "$URL" \
              '.version=$v | .hash=$h | .url=$u' bucket/actionsmonitor.json \
              > bucket/actionsmonitor.json.tmp
@@ -256,9 +256,9 @@ jobs:
         run: |
           $TAG = "${{ needs.release.outputs.version_tag }}"
           $VERSION = $TAG.TrimStart("v")
-          $URL = "https://github.com/summitnl/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
+          $URL = "https://github.com/WizX20/ActionsMonitor/releases/download/${TAG}/ActionsMonitor.exe"
           Invoke-WebRequest -Uri https://aka.ms/wingetcreate/latest -OutFile wingetcreate.exe
-          ./wingetcreate.exe update Summit.ActionsMonitor `
+          ./wingetcreate.exe update WizX20.ActionsMonitor `
               --version $VERSION `
               --urls $URL `
               --submit `

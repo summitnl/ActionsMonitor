@@ -55,7 +55,7 @@ Releases are driven by `.github/workflows/release.yml` (manual dispatch only). T
 2. **`build-windows`** / **`build-linux`** — run PyInstaller on `windows-latest` / `ubuntu-latest`; embed a 7-char commit SHA into `src/version.py`.
 3. **`release`** — tags `v$(date -u +%Y.%m.%d)`, deletes any same-day tag, creates the GitHub Release with `ActionsMonitor.exe` + `ActionsMonitor-linux` attached, and uses the first dated block of `CHANGELOG.md` as the release body.
 4. **`update-scoop`** — computes the SHA256 of the uploaded exe, bumps `bucket/actionsmonitor.json` (version, URL, hash), and commits back to `main`.
-5. **`update-winget`** — runs `wingetcreate update Summit.ActionsMonitor` on the new release URL and submits a PR to `microsoft/winget-pkgs`.
+5. **`update-winget`** — runs `wingetcreate update WizX20.ActionsMonitor` on the new release URL and submits a PR to `microsoft/winget-pkgs`.
 
 ### Required secrets
 
@@ -63,25 +63,25 @@ Releases are driven by `.github/workflows/release.yml` (manual dispatch only). T
 
 ### First-time winget bootstrap
 
-The automated `update-winget` job only works once `Summit.ActionsMonitor` exists in `microsoft/winget-pkgs`. Do the first submission manually from a Windows box:
+The automated `update-winget` job only works once `WizX20.ActionsMonitor` exists in `microsoft/winget-pkgs`. Do the first submission manually from a Windows box, against the first WizX20 release URL:
 
 ```powershell
 winget install Microsoft.WingetCreate
-wingetcreate new https://github.com/summitnl/ActionsMonitor/releases/download/v2026.04.22/ActionsMonitor.exe
+wingetcreate new https://github.com/WizX20/ActionsMonitor/releases/download/v<TAG>/ActionsMonitor.exe
 ```
 
 Fill the prompts:
 
 | Field | Value |
 |---|---|
-| `PackageIdentifier` | `Summit.ActionsMonitor` |
-| `PackageVersion` | `2026.04.22` |
-| `Publisher` | `Summit` |
+| `PackageIdentifier` | `WizX20.ActionsMonitor` |
+| `PackageVersion` | `<TAG without leading v>` |
+| `Publisher` | `WizX20` |
 | `PackageName` | `Actions Monitor` |
 | `Moniker` | `actionsmonitor` |
-| `License` | `Summit Free Use License` |
+| `License` | `WizX20 Free Use License` |
 | `ShortDescription` | `Desktop monitor for GitHub Actions workflows and pull requests.` |
-| `Homepage` | `https://github.com/summitnl/ActionsMonitor` |
+| `Homepage` | `https://github.com/WizX20/ActionsMonitor` |
 | `InstallerType` | `portable` |
 | `Commands` | `actionsmonitor` |
 
@@ -89,7 +89,7 @@ Then `wingetcreate submit --token <PAT>`. Initial review can take days; subseque
 
 ### Repo visibility
 
-winget and Scoop both fetch release assets over unauthenticated HTTPS. The `summitnl/ActionsMonitor` repository must be **public** for the two install channels to work.
+winget and Scoop both fetch release assets over unauthenticated HTTPS. The `WizX20/ActionsMonitor` repository must be **public** for the two install channels to work.
 
 ## Scoop bucket maintenance
 
@@ -98,7 +98,7 @@ winget and Scoop both fetch release assets over unauthenticated HTTPS. The `summ
 - Users subscribe to the bucket directly from this repo:
 
   ```powershell
-  scoop bucket add summit https://github.com/summitnl/ActionsMonitor
+  scoop bucket add wizx20 https://github.com/WizX20/ActionsMonitor
   scoop install actionsmonitor
   ```
 

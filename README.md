@@ -1,5 +1,5 @@
 <p align="center">
-  <a href="https://summit.nl"><img src="docs/summit.svg" alt="Summit" height="35"></a>
+  <a href="https://github.com/WizX20"><img src="docs/wizx20.png" alt="WizX20" height="60"></a>
 </p>
 
 # Actions Monitor
@@ -10,7 +10,7 @@ A lightweight tray application that monitors GitHub Actions workflow statuses an
 
 ## License
 
-This project is licensed under the [Summit Free Use License](LICENSE). All copies and forks must retain the [NOTICE](NOTICE) file.
+This project is licensed under the [WizX20 Free Use License](LICENSE). All copies and forks must retain the [NOTICE](NOTICE) file.
 
 ## Requirements
 
@@ -24,19 +24,19 @@ This project is licensed under the [Summit Free Use License](LICENSE). All copie
 ### Windows — winget (recommended)
 
 ```powershell
-winget install Summit.ActionsMonitor
+winget install WizX20.ActionsMonitor
 ```
 
 ### Windows — Scoop
 
 ```powershell
-scoop bucket add summit https://github.com/summitnl/ActionsMonitor
+scoop bucket add wizx20 https://github.com/WizX20/ActionsMonitor
 scoop install actionsmonitor
 ```
 
 ### Direct download
 
-Grab `ActionsMonitor.exe` (Windows) or `ActionsMonitor-linux` from [GitHub Releases](https://github.com/summitnl/ActionsMonitor/releases/latest).
+Grab `ActionsMonitor.exe` (Windows) or `ActionsMonitor-linux` from [GitHub Releases](https://github.com/WizX20/ActionsMonitor/releases/latest).
 
 > **Heads up:** the binary is unsigned, so the browser flags the `.exe` as unverified and Windows marks it blocked. Right-click the downloaded file → **Properties** → tick **Unblock** → **OK** before running. Prefer winget or Scoop to skip this step.
 
@@ -183,7 +183,7 @@ Running from source does not auto-update — use `git pull` manually.
 
 ## Uninstall
 
-- **winget:** `winget uninstall Summit.ActionsMonitor`
+- **winget:** `winget uninstall WizX20.ActionsMonitor`
 - **Scoop:** `scoop uninstall actionsmonitor`
 - **Direct download:** disable **Start with Windows** in the app footer, then delete the folder.
 
