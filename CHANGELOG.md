@@ -2,6 +2,7 @@
 
 ### 2026-04-28
 
+- **Daily build now publishes to winget** — `Summit.ActionsMonitor` is approved on `microsoft/winget-pkgs`, so `enable_winget` flips to `true` everywhere: default in `_release.yml`, daily `build.yml`, and the manual `release.yml` dispatch input. Daily releases now PR a manifest bump to winget alongside the existing Scoop bump (still gated by `secrets.WINGET_PAT` and `needs.release.result == 'success'`, so a failed build skips both managers). `winget upgrade Summit.ActionsMonitor` will track the daily tag instead of lagging behind the manual release cycle.
 - **Update download no longer hangs on connection close** — `UpdateChecker._apply_release_update` previously wrapped the download in `with requests.get(...) as dl`, so the function couldn't return until urllib3's `__exit__` had finished tearing down the socket. On Windows with intercepting AV / proxy stacks (NetSkope etc.) that close can stall for minutes after the body has been fully read, leaving the dialog pinned at "Downloading… 100%" even though `ActionsMonitor.update` was already on disk. Switched to an explicit `try / finally` around the response and now run `dl.close()` on a daemon thread joined with a 2 s timeout — the file write is fully done before close starts, the result signal fires immediately, and a stuck socket teardown is left to GC instead of blocking the UI.
 
 ### 2026-04-24

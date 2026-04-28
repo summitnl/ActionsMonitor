@@ -10,7 +10,7 @@ on:
       enable_winget:
         description: "Submit winget update after release"
         type: boolean
-        default: false
+        default: true
       tag_strategy:
         description: "overwrite = delete today's tag and recreate; suffix = try v<date>, then v<date>.2, .3..."
         type: string

@@ -10,7 +10,7 @@ on:
       enable_winget:
         description: "Submit winget update"
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: write

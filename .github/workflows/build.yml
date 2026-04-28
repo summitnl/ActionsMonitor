@@ -13,6 +13,6 @@ jobs:
     uses: ./.github/workflows/_release.yml
     with:
       enable_scoop: true
-      enable_winget: false
+      enable_winget: true
       tag_strategy: overwrite
     secrets: inherit
