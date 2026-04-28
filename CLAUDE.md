@@ -219,7 +219,7 @@ When adding features, always add a dated changelog entry to `CHANGELOG.md`. Do n
 **Linux:** Build via WSL (Ubuntu-24.04). The Windows filesystem (`/mnt/c`) has permission issues with PyInstaller, so copy to `/tmp` first:
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/Summit/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onefile --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && cp /tmp/am-build/dist/ActionsMonitor-linux /mnt/c/Repos/Summit/ActionsMonitor/ && rm -rf /tmp/am-build"
+wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onefile --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && cp /tmp/am-build/dist/ActionsMonitor-linux /mnt/c/Repos/ActionsMonitor/ && rm -rf /tmp/am-build"
 ```
 
 **Prerequisites (Ubuntu 24.04):**
