@@ -1,5 +1,10 @@
 <p align="center">
-  <a href="https://github.com/WizX20"><img src="docs/wizx20.png" alt="WizX20" height="60"></a>
+  <a href="https://github.com/WizX20">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="docs/wizx20.png">
+      <img src="docs/wizx20-transparent.png" alt="WizX20" height="60">
+    </picture>
+  </a>
 </p>
 
 # Actions Monitor
