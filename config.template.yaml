@@ -67,6 +67,14 @@ notifications:
   # "2h", etc. Set to 0 to disable (never suppress).
   max_notification_age: "1h"
 
+  # How long the toast notification stays visible before auto-dismissing.
+  # Accepted values: "short" or "long".
+  #   Windows: native toast durations (~7s short, ~25s long).
+  #            Note: respects the OS "Show notifications for" accessibility
+  #            setting if the user has overridden it system-wide.
+  #   Linux:   ~5s short, ~15s long (passed to plyer's timeout).
+  duration: short
+
   # Notify when a new workflow run starts
   new_run:
     enabled: true

@@ -2,6 +2,14 @@
 
 ### 2026-04-29
 
+- **Hover affordance + tooltips on row title/subtitle links** — clickable row labels (`_pr_title_lbl`, `_name_lbl`, `_branch_lbl`) now shift to amber (`FG_LINK`) and underline on hover, so the click target is visually discoverable instead of relying on the bare `PointingHandCursor`. New `_link_css()` helper emits `QLabel { color: <base>; } QLabel:hover { color: #FBBF24; text-decoration: underline; }` per-label, replacing the six raw `setStyleSheet(...)` call sites in row init + `set_snoozed`. Snoozed rows keep the hover affordance with their dimmed base colours so the URL is still discoverable. Tooltips: PR title → "Open PR on GitHub"; workflow name + branch subtitle → "Open latest run on GitHub". Tooltips set once at init; hover styling persists across snooze/dim state changes.
+
+### 2026-04-29
+
+- **Configurable toast notification duration** — new `notifications.duration` config key (`"short"` default, or `"long"`). Wired through `NotificationManager.set_duration()` from `_start_pollers`; `_send` reads the snapshot under the existing `_lock` and threads it to winotify's `duration=` (Windows native ~7s/~25s) and a derived plyer `timeout` of 5/15s on Linux. Invalid values silently coerce to `"short"`. Documented in `config.template.yaml` next to `max_notification_age`. Note for users: Windows respects the OS accessibility "Show notifications for" override if set system-wide, which can extend display time beyond the toast's nominal duration.
+
+### 2026-04-29
+
 - **README logo bumped + winget marked broken** — header WizX20 logo was rendering at `height="60"` which compressed the wordmark on GitHub's repo page (way smaller than the surrounding `# Actions Monitor` H1); raised to `height="140"` so the brand mark reads at glance height. Added a "Currently broken" callout above the `winget install` block pointing users at Scoop / direct download until the winget pipeline is fixed; demoted "(recommended)" from winget to the Scoop section to match.
 
 ### 2026-04-29

@@ -907,6 +907,7 @@ DEFAULT_CONFIG: dict = {
     "notifications": {
         "batch_window": 1,
         "max_notification_age": "1h",
+        "duration": "short",
         "new_run":  {"enabled": True,  "sound": "default" if IS_LINUX else "whistle"},
         "failure":  {"enabled": True,  "sound": "default"},
         "success":  {"enabled": True,  "sound": "none"},
@@ -1582,12 +1583,20 @@ class NotificationManager:
         self._pending: list[_PendingNotification] = []
         self._flush_timer: Optional[threading.Timer] = None
         self._batch_window: float = 3.0
+        self._duration: str = "short"
         self._recently_notified: set[tuple[int, Optional[str]]] = set()
         self._notified_lock = threading.Lock()
 
     def set_batch_window(self, seconds: float):
         with self._lock:
             self._batch_window = max(seconds, 0.0)
+
+    def set_duration(self, duration: str):
+        d = (duration or "short").strip().lower()
+        if d not in ("short", "long"):
+            d = "short"
+        with self._lock:
+            self._duration = d
 
     def drain_recently_notified(self) -> set[tuple[int, Optional[str]]]:
         with self._notified_lock:
@@ -1683,13 +1692,16 @@ class NotificationManager:
             with self._notified_lock:
                 self._recently_notified.update(row_keys)
         sound_coupled = False
+        with self._lock:
+            duration = self._duration
+        plyer_timeout = 15 if duration == "long" else 5
         if IS_WINDOWS and WINOTIFY_AVAILABLE:
             try:
                 toast = _WinNotification(
                     app_id="WizX20.ActionsMonitor",
                     title=title,
                     msg=message,
-                    duration="short",
+                    duration=duration,
                     icon=str(APP_ICO) if APP_ICO.exists() else "",
                     launch=str(_FOCUS_VBS) if _FOCUS_VBS.exists() else "",
                 )
@@ -1709,7 +1721,7 @@ class NotificationManager:
                     app_name=APP_NAME,
                     title=title,
                     message=message,
-                    timeout=5,
+                    timeout=plyer_timeout,
                 )
             except Exception:
                 pass
@@ -4028,6 +4040,12 @@ class _ClickableLabel(QLabel):
                 webbrowser.open(url)
 
 
+def _link_css(color: str, size: int, hover: str = FG_LINK) -> str:
+    """Stylesheet for a clickable label: base color + amber hover via :hover pseudo-state."""
+    return (f"QLabel {{ color: {color}; font-size: {size}px; }} "
+            f"QLabel:hover {{ color: {hover}; text-decoration: underline; }}")
+
+
 def _make_badge(text: str, bg: str, fg: str, bold: bool = False) -> QLabel:
     """Create a small badge label with styled background."""
     lbl = QLabel(text)
@@ -4087,7 +4105,8 @@ class WorkflowRow(QWidget):
         # PR title (shown above top_row for PR mode)
         self._pr_title_lbl = _ClickableLabel(
             url_fn=lambda: self._state.pr_url)
-        self._pr_title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+        self._pr_title_lbl.setStyleSheet(_link_css(FG_TEXT, 12))
+        self._pr_title_lbl.setToolTip("Open PR on GitHub")
         self._pr_title_lbl.setMinimumWidth(0)
         self._pr_title_lbl.setWordWrap(True)
         self._pr_title_lbl.setVisible(False)
@@ -4100,14 +4119,16 @@ class WorkflowRow(QWidget):
 
         self._name_lbl = _ClickableLabel(
             state.name, url_fn=lambda: self._state.run_url or self._state.url)
-        self._name_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+        self._name_lbl.setStyleSheet(_link_css(FG_TEXT, 12))
+        self._name_lbl.setToolTip("Open latest run on GitHub")
         self._name_lbl.setMinimumWidth(0)
         self._name_lbl.setWordWrap(True)
         top_row.addWidget(self._name_lbl, 1)
 
         self._branch_lbl = _ClickableLabel(
             url_fn=lambda: self._state.run_url or self._state.url)
-        self._branch_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        self._branch_lbl.setStyleSheet(_link_css(FG_MUTED, 11))
+        self._branch_lbl.setToolTip("Open latest run on GitHub")
         self._branch_lbl.setMinimumWidth(0)
         self._branch_lbl.setWordWrap(True)
         self._branch_lbl.setVisible(False)
@@ -4229,10 +4250,10 @@ class WorkflowRow(QWidget):
         if snoozed:
             self._accent.setStyleSheet(f"background-color: #3F3B38;")
             self._info_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
-            self._name_lbl.setStyleSheet(f"color: {dim_text}; font-size: 12px;")
+            self._name_lbl.setStyleSheet(_link_css(dim_text, 12))
             self._poll_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
-            self._branch_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
-            self._pr_title_lbl.setStyleSheet(f"color: {dim_text}; font-size: 12px;")
+            self._branch_lbl.setStyleSheet(_link_css(dim_muted, 11))
+            self._pr_title_lbl.setStyleSheet(_link_css(dim_text, 12))
             if self._icon_opacity is None:
                 self._icon_opacity = QGraphicsOpacityEffect(self._icon_lbl)
                 self._icon_lbl.setGraphicsEffect(self._icon_opacity)
@@ -4241,10 +4262,10 @@ class WorkflowRow(QWidget):
             self._accent.setStyleSheet(
                 f"background-color: {COLOUR.get(self._state.status, COLOUR[ST_UNKNOWN])};")
             self._info_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
-            self._name_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+            self._name_lbl.setStyleSheet(_link_css(FG_TEXT, 12))
             self._poll_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
-            self._branch_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
-            self._pr_title_lbl.setStyleSheet(f"color: {FG_TEXT}; font-size: 12px;")
+            self._branch_lbl.setStyleSheet(_link_css(FG_MUTED, 11))
+            self._pr_title_lbl.setStyleSheet(_link_css(FG_TEXT, 12))
             if self._icon_opacity is not None:
                 self._icon_opacity.setOpacity(1.0)
         self._restyle_static_badges()
@@ -5678,6 +5699,7 @@ class MainWindow(QMainWindow):
         cfg = self._config_mgr.get()
         notif_cfg = cfg.get("notifications", {})
         NOTIF.set_batch_window(float(notif_cfg.get("batch_window", 1)))
+        NOTIF.set_duration(str(notif_cfg.get("duration", "short")))
         workflows = cfg.get("workflows") or []
 
         self._wid_stable_keys = {
