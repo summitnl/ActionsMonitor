@@ -26,7 +26,7 @@ This project is licensed under the [WizX20 Free Use License](LICENSE). All copie
 
 ![Application window](docs/application.png)
 
-> **Note:** screenshot is from an earlier release; the current UI looks slightly different.
+> **Note:** screenshot is refreshed periodically and may lag the latest release; the live UI can look slightly different.
 
 ### Windows — winget
 
