@@ -1090,50 +1090,24 @@ def _github_api_get(url: str, token: str, session: Optional[requests.Session] = 
         headers["If-None-Match"] = cached[0]
 
     _get = (session or requests).get
-    resp = _get(url, params=params, headers=headers, timeout=timeout)
-    status = resp.status_code
+    resp = _request_with_retry(_get, url, params=params, headers=headers, timeout=timeout)
 
     # 304 Not Modified — free, return cached payload.
-    if status == 304:
+    if resp.status_code == 304:
         if cached:
             return cached[1]
         # Server sent 304 but our cache is gone (race/protocol-violation) —
         # retry without If-None-Match so we get a real body back.
         headers.pop("If-None-Match", None)
-        resp = _get(url, params=params, headers=headers, timeout=timeout)
-        status = resp.status_code
+        resp = _request_with_retry(_get, url, params=params, headers=headers, timeout=timeout)
 
-    # 429 or secondary-limit 403: trip cooldown and raise.
-    if status == 429 or (
-        status == 403
-        and "rate limit" in (resp.text or "").lower()
-    ):
-        wait = _parse_retry_after(resp)
-        _set_cooldown(wait, f"HTTP {status}")
-        raise RateLimited(wait, f"HTTP {status}")
-
-    # 401 Unauthorized — token revoked/rotated. Invalidate the cached username
-    # so the next poll re-resolves against the current token instead of loop-
-    # ing with a stale login in actor= params.
-    if status == 401:
-        global _cached_github_username
-        with _github_username_lock:
-            _cached_github_username = None
+    _check_rate_limit_response(resp)
+    _invalidate_username_on_401(resp.status_code)
 
     resp.raise_for_status()
     data = resp.json()
 
-    # Primary limit exhausted — set cooldown until reset even though this call succeeded.
-    remaining_hdr = resp.headers.get("X-RateLimit-Remaining")
-    if remaining_hdr is not None:
-        try:
-            if int(remaining_hdr) == 0:
-                reset_hdr = resp.headers.get("X-RateLimit-Reset")
-                if reset_hdr:
-                    wait = max(0.0, int(reset_hdr) - time.time())
-                    _set_cooldown(wait, "primary limit exhausted")
-        except ValueError:
-            pass
+    _track_remaining_header(resp)
 
     # Cache ETag + parsed body so the next identical request can 304.
     etag = resp.headers.get("ETag")
@@ -1322,6 +1296,79 @@ def _cooldown_remaining() -> tuple[float, str]:
         return max(0.0, _rate_limit_until - time.monotonic()), _rate_limit_reason
 
 
+def _friendly_error(exc: BaseException) -> str:
+    """Map a poller exception to a short, user-facing status string.
+
+    Raw `str()` on a `requests.ConnectionError` yields the urllib3 tuple
+    (e.g. ``('Connection aborted.', RemoteDisconnected(...))``) — that's the
+    text that ends up in the row when GitHub drops a keep-alive socket.
+    """
+    if isinstance(exc, requests.ConnectionError):
+        return "Connection lost — retrying"
+    if isinstance(exc, requests.Timeout):
+        return "Request timed out — retrying"
+    if isinstance(exc, requests.RequestException):
+        return "Network error — retrying"
+    msg = str(exc) or exc.__class__.__name__
+    return msg if len(msg) <= 120 else msg[:117] + "…"
+
+
+# Exception classes worth retrying once: idle GitHub keep-alive sockets get
+# RST'd routinely, and a single transparent retry kills the noise without
+# hiding genuine outages.
+_TRANSIENT_REQUEST_ERRORS = (
+    requests.ConnectionError,
+    requests.Timeout,
+    requests.exceptions.ChunkedEncodingError,
+)
+
+
+def _request_with_retry(fn, *args, retries: int = 1, backoff: float = 0.4, **kwargs):
+    """Call `fn(*args, **kwargs)`; retry once on transient connection errors."""
+    for attempt in range(retries + 1):
+        try:
+            return fn(*args, **kwargs)
+        except _TRANSIENT_REQUEST_ERRORS:
+            if attempt >= retries:
+                raise
+            time.sleep(backoff)
+
+
+def _check_rate_limit_response(resp) -> None:
+    """Trip cooldown + raise `RateLimited` on 429 or secondary-limit 403."""
+    status = resp.status_code
+    if status == 429 or (
+        status == 403 and "rate limit" in (resp.text or "").lower()
+    ):
+        wait = _parse_retry_after(resp)
+        _set_cooldown(wait, f"HTTP {status}")
+        raise RateLimited(wait, f"HTTP {status}")
+
+
+def _track_remaining_header(resp) -> None:
+    """If X-RateLimit-Remaining hit 0, set cooldown until reset."""
+    remaining_hdr = resp.headers.get("X-RateLimit-Remaining")
+    if remaining_hdr is None:
+        return
+    try:
+        if int(remaining_hdr) == 0:
+            reset_hdr = resp.headers.get("X-RateLimit-Reset")
+            if reset_hdr:
+                wait = max(0.0, int(reset_hdr) - time.time())
+                _set_cooldown(wait, "primary limit exhausted")
+    except ValueError:
+        pass
+
+
+def _invalidate_username_on_401(status: int) -> None:
+    """Clear cached GitHub username on 401 so a rotated token recovers next poll."""
+    if status != 401:
+        return
+    global _cached_github_username
+    with _github_username_lock:
+        _cached_github_username = None
+
+
 def _github_graphql_post(query: str, variables: dict, token: str,
                          session: Optional[requests.Session] = None,
                          timeout: int = 15) -> dict:
@@ -1334,40 +1381,21 @@ def _github_graphql_post(query: str, variables: dict, token: str,
         raise RateLimited(remaining, reason or "cooldown")
 
     _post = (session or requests).post
-    resp = _post(
+    resp = _request_with_retry(
+        _post,
         "https://api.github.com/graphql",
         headers=_gh_headers(token),
         json={"query": query, "variables": variables},
         timeout=timeout,
     )
-    status = resp.status_code
 
-    if status == 429 or (
-        status == 403
-        and "rate limit" in (resp.text or "").lower()
-    ):
-        wait = _parse_retry_after(resp)
-        _set_cooldown(wait, f"HTTP {status}")
-        raise RateLimited(wait, f"HTTP {status}")
-
-    if status == 401:
-        global _cached_github_username
-        with _github_username_lock:
-            _cached_github_username = None
+    _check_rate_limit_response(resp)
+    _invalidate_username_on_401(resp.status_code)
 
     resp.raise_for_status()
     payload = resp.json()
 
-    remaining_hdr = resp.headers.get("X-RateLimit-Remaining")
-    if remaining_hdr is not None:
-        try:
-            if int(remaining_hdr) == 0:
-                reset_hdr = resp.headers.get("X-RateLimit-Reset")
-                if reset_hdr:
-                    wait = max(0.0, int(reset_hdr) - time.time())
-                    _set_cooldown(wait, "primary limit exhausted")
-        except ValueError:
-            pass
+    _track_remaining_header(resp)
 
     if "errors" in payload:
         raise RuntimeError(f"GraphQL errors: {payload['errors']}")
@@ -1854,6 +1882,19 @@ class WorkflowPoller(threading.Thread):
                               branch=branch_part)
         self.event_queue.put(StatusEvent(self.wid, dummy, sub_key=sk, removed=True))
 
+    def _emit_request_error(self, exc: BaseException, *, branch=None, sub_key=None):
+        """Emit a status from a `requests` exception with a sensible label.
+
+        HTTPError → ``HTTP {status}``; everything else → `_friendly_error()`.
+        Centralises the HTTPError-vs-generic split that every poller's `except`
+        block was repeating verbatim.
+        """
+        if isinstance(exc, requests.HTTPError) and exc.response is not None:
+            label = f"HTTP {exc.response.status_code}"
+        else:
+            label = _friendly_error(exc)
+        self._emit_error(label, branch=branch, sub_key=sub_key)
+
     def _emit_error(self, error: str = "", branch=None, sub_key=None):
         """Emit a ST_UNKNOWN state with an optional error message."""
         eff_branch = branch or self.branch
@@ -1904,11 +1945,8 @@ class WorkflowPoller(threading.Thread):
 
         try:
             run = fetch_latest_run(self.owner, self.repo, self.wf_file, self.branch, token, session=self._session)
-        except requests.HTTPError as exc:
-            self._emit_error(f"HTTP {exc.response.status_code}", branch=self.branch)
-            return
         except Exception as exc:
-            self._emit_error(str(exc), branch=self.branch)
+            self._emit_request_error(exc, branch=self.branch)
             return
 
         state.last_check = datetime.now()
@@ -2061,7 +2099,7 @@ class PRWorkflowPoller(WorkflowPoller):
         try:
             username = fetch_github_username(token, session=self._session)
         except Exception as exc:
-            self._emit_error(f"Cannot resolve GitHub user: {exc}")
+            self._emit_error(f"Cannot resolve GitHub user: {_friendly_error(exc)}")
             return
         if not username:
             self._emit_error("No token configured (PR mode requires a token)")
@@ -2081,15 +2119,11 @@ class PRWorkflowPoller(WorkflowPoller):
                     per_page=self._max_prs * 2, session=self._session,
                 )
                 all_runs.extend(runs)
-            except requests.HTTPError as exc:
-                if not all_runs and wf_file == self.wf_file:
-                    self._emit_error(f"HTTP {exc.response.status_code}")
-                    return
-                # Extra workflow failed — skip silently
             except Exception as exc:
                 if not all_runs and wf_file == self.wf_file:
-                    self._emit_error(str(exc))
+                    self._emit_request_error(exc)
                     return
+                # Extra workflow failed — skip silently
 
         # Fetch the user's open PRs — used to discover branches with old runs
         # AND to filter out branches whose PRs have been closed/merged.
@@ -2519,7 +2553,7 @@ class ActorWorkflowPoller(WorkflowPoller):
         try:
             username = fetch_github_username(token, session=self._session)
         except Exception as exc:
-            self._emit_error(f"Cannot resolve GitHub user: {exc}")
+            self._emit_error(f"Cannot resolve GitHub user: {_friendly_error(exc)}")
             return
         if not username:
             self._emit_error("No token configured (actor mode requires a token)")
@@ -2536,11 +2570,8 @@ class ActorWorkflowPoller(WorkflowPoller):
                 per_page=self._max_runs * 3, session=self._session,
                 conclusion=conclusion_filter,
             )
-        except requests.HTTPError as exc:
-            self._emit_error(f"HTTP {exc.response.status_code}")
-            return
         except Exception as exc:
-            self._emit_error(str(exc))
+            self._emit_request_error(exc)
             return
 
         # Client-side filter: when filter is "failed", also keep in-progress runs
@@ -2694,7 +2725,7 @@ class URLQueryPoller(WorkflowPoller):
             try:
                 username = fetch_github_username(token, session=self._session)
             except Exception as exc:
-                self._emit_error(f"Cannot resolve @me: {exc}")
+                self._emit_error(f"Cannot resolve @me: {_friendly_error(exc)}")
                 return
             if not username:
                 self._emit_error("Cannot resolve @me — no user")
@@ -2714,11 +2745,8 @@ class URLQueryPoller(WorkflowPoller):
                     "order": "desc",
                 },
             )
-        except requests.HTTPError as exc:
-            self._emit_error(f"HTTP {exc.response.status_code}")
-            return
         except Exception as exc:
-            self._emit_error(str(exc))
+            self._emit_request_error(exc)
             return
 
         items = data.get("items", []) or []
@@ -4676,7 +4704,10 @@ class UpdateChecker:
             hasher = hashlib.sha256() if expected_sha256 else None
             if progress_cb:
                 progress_cb(0, expected_size)
-            dl = requests.get(download_url, stream=True, timeout=120)
+            # (connect_timeout, read_timeout) — read timeout is per-chunk, so a
+            # slow proxy stalling mid-download trips after 60s instead of pinning
+            # the dialog at 100% until the full 120s hits.
+            dl = requests.get(download_url, stream=True, timeout=(15, 60))
             try:
                 dl.raise_for_status()
                 with open(tmp_path, "wb") as f:
