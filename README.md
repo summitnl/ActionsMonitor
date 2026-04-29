@@ -2,7 +2,7 @@
   <a href="https://github.com/WizX20">
     <picture>
       <source media="(prefers-color-scheme: dark)" srcset="docs/wizx20.png">
-      <img src="docs/wizx20-transparent.png" alt="WizX20" height="60">
+      <img src="docs/wizx20-transparent.png" alt="WizX20" height="140">
     </picture>
   </a>
 </p>
@@ -26,13 +26,15 @@ This project is licensed under the [WizX20 Free Use License](LICENSE). All copie
 
 ![Application window](docs/application.png)
 
-### Windows — winget (recommended)
+### Windows — winget
+
+> **Currently broken.** The winget publishing pipeline is temporarily disabled while we sort out a packaging issue, so the manifest is stale. Use Scoop or the direct download in the meantime.
 
 ```powershell
 winget install WizX20.ActionsMonitor
 ```
 
-### Windows — Scoop
+### Windows — Scoop (recommended)
 
 ```powershell
 scoop bucket add wizx20 https://github.com/WizX20/ActionsMonitor

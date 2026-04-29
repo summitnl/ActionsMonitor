@@ -2,6 +2,14 @@
 
 ### 2026-04-29
 
+- **README logo bumped + winget marked broken** — header WizX20 logo was rendering at `height="60"` which compressed the wordmark on GitHub's repo page (way smaller than the surrounding `# Actions Monitor` H1); raised to `height="140"` so the brand mark reads at glance height. Added a "Currently broken" callout above the `winget install` block pointing users at Scoop / direct download until the winget pipeline is fixed; demoted "(recommended)" from winget to the Scoop section to match.
+
+### 2026-04-29
+
+- **Winget publish disabled by default in release workflows** — winget submission is currently broken (tracked in backlog), so flipped `enable_winget` default from `true` to `false` in both the manual `release.yml` dispatch input and the daily `build.yml` caller. `_release.yml` reusable workflow input default unchanged (callers always pass an explicit value). Re-enable per-run via the workflow_dispatch checkbox once the winget pipeline is fixed.
+
+### 2026-04-29
+
 - **Update helper no longer hangs when previous PID survives** — `UpdateChecker.restart_app` calls `os._exit(0)` after spawning the helper, but on some installs (notably the `C:\Tools\ActionsMonitor` test rig built before this session) the previous process never disappeared from `tasklist`, so the helper batch's `:waitpid` loop ran indefinitely while a visible Windows Terminal tab showed `findstr /C:"<pid>"`. Helper waitpid loop now bounded: 30 iterations × 2s on Windows, 120 × 0.5s on Linux. On timeout it emits `[waitpid timed out…]` to `am_update.log` and force-kills the pid (`taskkill /F /PID …` / `kill -9 …`) so the existing rename-retry loop can take over even when `os._exit` failed to land. Visibility fix on Windows: `subprocess.Popen` was using `DETACHED_PROCESS | CREATE_NO_WINDOW` together — the combo is undefined and on Win11 with Windows Terminal as default it forces a visible terminal tab. Now uses `CREATE_NO_WINDOW` alone with `STARTUPINFO.wShowWindow = SW_HIDE` for belt-and-braces.
 
 ### 2026-04-29
