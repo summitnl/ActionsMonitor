@@ -4188,12 +4188,19 @@ class UpdateChecker:
                 f'echo update_path={update_path} >> "%LOG%"\r\n'
                 f'echo old_path={old_path} >> "%LOG%"\r\n'
                 'echo [waiting for pid to exit] >> "%LOG%"\r\n'
+                "set /a wait_tries=0\r\n"
                 ":waitpid\r\n"
                 f'tasklist /FI "PID eq {pid}" 2>nul | findstr /C:"{pid}" >nul\r\n'
-                "if %errorlevel% EQU 0 (\r\n"
-                "  ping -n 2 127.0.0.1 >nul\r\n"
-                "  goto waitpid\r\n"
-                ")\r\n"
+                "if %errorlevel% NEQ 0 goto exited\r\n"
+                "set /a wait_tries+=1\r\n"
+                "if %wait_tries% GEQ 30 goto force_kill\r\n"
+                "ping -n 2 127.0.0.1 >nul\r\n"
+                "goto waitpid\r\n"
+                ":force_kill\r\n"
+                f'echo [waitpid timed out after %wait_tries% iterations; force-killing pid={pid}] >> "%LOG%"\r\n'
+                f'taskkill /F /PID {pid} >> "%LOG%" 2>&1\r\n'
+                "ping -n 3 127.0.0.1 >nul\r\n"
+                ":exited\r\n"
                 'echo [pid exited, attempting swap] >> "%LOG%"\r\n'
                 "set /a tries=0\r\n"
                 ":tryrename\r\n"
@@ -4219,11 +4226,18 @@ class UpdateChecker:
                 '(goto) 2>nul & del "%~f0"\r\n',
                 encoding="ascii",
             )
-            DETACHED_PROCESS = 0x00000008
+            # CREATE_NO_WINDOW alone — DETACHED_PROCESS is for GUI children
+            # and combining the two is documented as undefined; on Win11 with
+            # Windows Terminal as default, the combo can show a visible
+            # terminal tab. STARTUPINFO/SW_HIDE belt-and-braces.
             CREATE_NO_WINDOW = 0x08000000
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = subprocess.SW_HIDE
             subprocess.Popen(
                 ["cmd", "/c", str(script)],
-                creationflags=DETACHED_PROCESS | CREATE_NO_WINDOW,
+                creationflags=CREATE_NO_WINDOW,
+                startupinfo=si,
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -4243,7 +4257,17 @@ class UpdateChecker:
                 f'echo "update_path={update_path}"\n'
                 f'echo "old_path={old_path}"\n'
                 "echo '[waiting for pid to exit]'\n"
-                f"while kill -0 {pid} 2>/dev/null; do sleep 0.5; done\n"
+                "wait_tries=0\n"
+                f"while kill -0 {pid} 2>/dev/null; do\n"
+                "  wait_tries=$((wait_tries + 1))\n"
+                "  if [ $wait_tries -ge 120 ]; then\n"
+                f"    echo \"[waitpid timed out after $wait_tries iterations; force-killing pid={pid}]\"\n"
+                f"    kill -9 {pid} 2>/dev/null\n"
+                "    sleep 1\n"
+                "    break\n"
+                "  fi\n"
+                "  sleep 0.5\n"
+                "done\n"
                 "echo '[pid exited, attempting swap]'\n"
                 f'if ! mv -f "{current_exe}" "{old_path}"; then\n'
                 "  echo '[FAILED: rename current->old]'\n"

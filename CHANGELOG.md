@@ -1,5 +1,13 @@
 # Changelog
 
+### 2026-04-29
+
+- **Update helper no longer hangs when previous PID survives** — `UpdateChecker.restart_app` calls `os._exit(0)` after spawning the helper, but on some installs (notably the `C:\Tools\ActionsMonitor` test rig built before this session) the previous process never disappeared from `tasklist`, so the helper batch's `:waitpid` loop ran indefinitely while a visible Windows Terminal tab showed `findstr /C:"<pid>"`. Helper waitpid loop now bounded: 30 iterations × 2s on Windows, 120 × 0.5s on Linux. On timeout it emits `[waitpid timed out…]` to `am_update.log` and force-kills the pid (`taskkill /F /PID …` / `kill -9 …`) so the existing rename-retry loop can take over even when `os._exit` failed to land. Visibility fix on Windows: `subprocess.Popen` was using `DETACHED_PROCESS | CREATE_NO_WINDOW` together — the combo is undefined and on Win11 with Windows Terminal as default it forces a visible terminal tab. Now uses `CREATE_NO_WINDOW` alone with `STARTUPINFO.wShowWindow = SW_HIDE` for belt-and-braces.
+
+### 2026-04-29
+
+- **Cleaner WizX20 icon at small sizes** — the bolt mark fused into a blob at 16/32px in the taskbar and toast notifications because the rounded-rect chrome consumed too much canvas, leaving the detailed mark in ~10 effective pixels. `_make_base_icon` now branches on size: ≤32px renders a clean amber `>` chevron with no chrome (legible in tray + toast); >32px keeps the full mark + dark rounded rect for the About dialog and Alt-Tab. Tray icons are pre-generated at 32 (was 64) so Windows scales the chevron down crisply rather than re-rendering the small-detail bolt.
+
 ### 2026-04-28
 
 - **Repository moved to WizX20 ownership** — repo is now hosted at `github.com/WizX20/ActionsMonitor` (transferred from `summitnl/ActionsMonitor`, GitHub auto-redirects keep old URLs working). All Summit branding has been stripped: logos, copyright, AppUserModelID, and the embedded "S" mark have been replaced with the WizX20 lightning bolt mark; LICENSE and NOTICE attribute to WizX20. The winget package is being renamed `Summit.ActionsMonitor` → `WizX20.ActionsMonitor`; existing winget users must `winget uninstall Summit.ActionsMonitor && winget install WizX20.ActionsMonitor` once the new package clears Microsoft moderation. Scoop bucket URL updated; existing local installs keep working under whatever bucket alias they registered. UpdateChecker now hits `api.github.com/repos/WizX20/ActionsMonitor/releases/latest`. Stale `manifests/s/Summit/` working copy removed — first WizX20 winget submission must be re-bootstrapped manually with `wingetcreate new`.
