@@ -26,6 +26,8 @@ This project is licensed under the [WizX20 Free Use License](LICENSE). All copie
 
 ![Application window](docs/application.png)
 
+> **Note:** screenshot is from a build 2–3 releases back; the current UI looks slightly different.
+
 ### Windows — winget
 
 > **Currently broken.** The winget publishing pipeline is temporarily disabled while we sort out a packaging issue, so the manifest is stale. Use Scoop or the direct download in the meantime.
