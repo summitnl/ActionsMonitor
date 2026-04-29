@@ -2,6 +2,10 @@
 
 ### 2026-04-29
 
+- **Two-link rows in branch and actor modes** — row title and subtitle now point at distinct URLs, mirroring PR mode. Title (name label) opens the workflow overview filtered by branch (e.g. `…/actions/workflows/foo.yml?query=branch%3Amain`); subtitle (branch label) opens the latest run instance. New `WorkflowState.workflow_url` field, populated by `_build_workflow_url(owner, repo, wf_file, branch)` (also exported for actor mode, which derives `wf_file` from each run's `path`). Branch poller sets it on success + `_emit_error`; actor poller sets it on both the active and snoozed-state branches. `_update_labels` now keeps the workflow-name label visible in actor mode (previously hidden when `head_branch` was truthy) and surfaces a branch subtitle in branch mode whenever both `workflow_url` and `run_url` are available, so every row exposes both click targets. Name-label tooltip flips dynamically: "Open workflow on GitHub" when both URLs are distinct, "Open latest run on GitHub" otherwise. Branch-label tooltip stays "Open latest run on GitHub". Hover/underline affordance from the previous change carries through.
+
+### 2026-04-29
+
 - **Hover affordance + tooltips on row title/subtitle links** — clickable row labels (`_pr_title_lbl`, `_name_lbl`, `_branch_lbl`) now shift to amber (`FG_LINK`) and underline on hover, so the click target is visually discoverable instead of relying on the bare `PointingHandCursor`. New `_link_css()` helper emits `QLabel { color: <base>; } QLabel:hover { color: #FBBF24; text-decoration: underline; }` per-label, replacing the six raw `setStyleSheet(...)` call sites in row init + `set_snoozed`. Snoozed rows keep the hover affordance with their dimmed base colours so the URL is still discoverable. Tooltips: PR title → "Open PR on GitHub"; workflow name + branch subtitle → "Open latest run on GitHub". Tooltips set once at init; hover styling persists across snooze/dim state changes.
 
 ### 2026-04-29
