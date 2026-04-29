@@ -1036,6 +1036,13 @@ def _build_workflow_url(owner: str, repo: str, wf_file: str, branch: Optional[st
     return base
 
 
+def _build_branch_url(owner: str, repo: str, branch: Optional[str]) -> str:
+    """Construct a GitHub branch tree URL."""
+    if not (owner and repo and branch):
+        return ""
+    return f"https://github.com/{owner}/{repo}/tree/{quote(branch, safe='/')}"
+
+
 def parse_actor_url(url: str) -> tuple[str, str, Optional[str]]:
     """Parse a GitHub Actions actor URL like:
       https://github.com/owner/repo/actions?query=actor%3Ausername
@@ -1512,6 +1519,7 @@ class WorkflowState:
     run_id:      Optional[int] = None
     run_url:     Optional[str] = None
     workflow_url: Optional[str] = None  # GitHub workflow overview URL (filtered by branch when known)
+    branch_url:   Optional[str] = None  # GitHub branch tree URL (e.g. /tree/main)
     run_number:  Optional[int] = None
     started_at:  Optional[str] = None
     run_updated_at: Optional[str] = None  # ISO 8601 from GitHub run API (last status change)
@@ -1848,11 +1856,13 @@ class WorkflowPoller(threading.Thread):
 
     def _emit_error(self, error: str = "", branch=None, sub_key=None):
         """Emit a ST_UNKNOWN state with an optional error message."""
+        eff_branch = branch or self.branch
         state = WorkflowState(
             name=self.name_display,
             url=self.cfg_entry.get("url", ""),
             branch=branch,
-            workflow_url=_build_workflow_url(self.owner, self.repo, self.wf_file, branch or self.branch),
+            workflow_url=_build_workflow_url(self.owner, self.repo, self.wf_file, eff_branch),
+            branch_url=_build_branch_url(self.owner, self.repo, eff_branch),
         )
         state.status = ST_UNKNOWN
         state.error = error or None
@@ -1885,6 +1895,7 @@ class WorkflowPoller(threading.Thread):
             url=self.cfg_entry.get("url", ""),
             branch=self.branch,
             workflow_url=_build_workflow_url(self.owner, self.repo, self.wf_file, self.branch),
+            branch_url=_build_branch_url(self.owner, self.repo, self.branch),
         )
 
         if not self.owner:
@@ -2210,6 +2221,7 @@ class PRWorkflowPoller(WorkflowPoller):
                         url=self.cfg_entry.get("url", ""),
                         branch=branch_name,
                         head_branch=branch_name,
+                        branch_url=_build_branch_url(self.owner, self.repo, branch_name),
                     )
                     snoozed_state.last_check = now
                     snoozed_state.status = agg_status
@@ -2257,6 +2269,7 @@ class PRWorkflowPoller(WorkflowPoller):
                     url=self.cfg_entry.get("url", ""),
                     branch=branch_name,
                     head_branch=branch_name,
+                    branch_url=_build_branch_url(self.owner, self.repo, branch_name),
                 )
                 state.last_check = now
                 state.status     = agg_status
@@ -2560,6 +2573,7 @@ class ActorWorkflowPoller(WorkflowPoller):
                     branch=hb_snz,
                     head_branch=hb_snz,
                     workflow_url=_build_workflow_url(self.owner, self.repo, wf_file_snz, hb_snz),
+                    branch_url=_build_branch_url(self.owner, self.repo, hb_snz),
                 )
                 snoozed_state.last_check = now
                 snoozed_state.status = _resolve_status(
@@ -2589,6 +2603,7 @@ class ActorWorkflowPoller(WorkflowPoller):
                 branch=hb,
                 head_branch=hb,
                 workflow_url=_build_workflow_url(self.owner, self.repo, wf_file_active, hb),
+                branch_url=_build_branch_url(self.owner, self.repo, hb),
             )
             state.last_check = now
 
@@ -2736,6 +2751,7 @@ class URLQueryPoller(WorkflowPoller):
                     url=item.get("html_url", ""),
                     branch=head_branch or None,
                     head_branch=head_branch or None,
+                    branch_url=_build_branch_url(owner, repo, head_branch) if head_branch else None,
                 )
                 snoozed_state.last_check = now
                 snoozed_state.status = ST_UNKNOWN
@@ -2771,6 +2787,7 @@ class URLQueryPoller(WorkflowPoller):
                 url=item.get("html_url", ""),
                 branch=head_branch or None,
                 head_branch=head_branch or None,
+                branch_url=_build_branch_url(owner, repo, head_branch) if head_branch else None,
             )
             state.last_check    = now
             state.status        = row_status
@@ -4142,7 +4159,7 @@ class WorkflowRow(QWidget):
 
         self._branch_lbl = _ClickableLabel(url_fn=self._branch_url)
         self._branch_lbl.setStyleSheet(_link_css(FG_MUTED, 11))
-        self._branch_lbl.setToolTip("Open latest run on GitHub")
+        self._branch_lbl.setToolTip("Open branch on GitHub")
         self._branch_lbl.setMinimumWidth(0)
         self._branch_lbl.setWordWrap(True)
         self._branch_lbl.setVisible(False)
@@ -4191,9 +4208,10 @@ class WorkflowRow(QWidget):
         self._badge_widget.setVisible(False)
         centre.addWidget(self._badge_widget)
 
-        # Status info line
-        self._info_lbl = QLabel()
-        self._info_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+        # Status info line — clickable, opens the latest run instance.
+        self._info_lbl = _ClickableLabel(url_fn=lambda: self._state.run_url or self._state.url)
+        self._info_lbl.setStyleSheet(_link_css(FG_MUTED, 11))
+        self._info_lbl.setToolTip("Open latest run on GitHub")
         self._info_lbl.setMinimumWidth(0)
         self._info_lbl.setWordWrap(True)
         centre.addWidget(self._info_lbl)
@@ -4236,15 +4254,15 @@ class WorkflowRow(QWidget):
 
     def _name_url(self) -> Optional[str]:
         s = self._state
-        # Name label opens workflow overview when both links are distinct;
-        # otherwise it's the only click target so it falls back to the run.
-        if s.workflow_url and (s.run_url or s.url):
-            return s.workflow_url
-        return s.run_url or s.url
+        # Name label opens workflow overview when available; falls back to the
+        # latest run, then to the configured URL.
+        return s.workflow_url or s.run_url or s.url
 
     def _branch_url(self) -> Optional[str]:
         s = self._state
-        return s.run_url or s.url
+        # Branch label opens the branch tree page; falls back to run_url so a
+        # click never feels dead when branch_url couldn't be resolved.
+        return s.branch_url or s.run_url or s.url
 
     def _on_right_click(self, pos):
         if self._snooze_cb:
@@ -4275,7 +4293,7 @@ class WorkflowRow(QWidget):
         dim_muted = "#44403C"
         if snoozed:
             self._accent.setStyleSheet(f"background-color: #3F3B38;")
-            self._info_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
+            self._info_lbl.setStyleSheet(_link_css(dim_muted, 11))
             self._name_lbl.setStyleSheet(_link_css(dim_text, 12))
             self._poll_lbl.setStyleSheet(f"color: {dim_muted}; font-size: 11px;")
             self._branch_lbl.setStyleSheet(_link_css(dim_muted, 11))
@@ -4287,7 +4305,7 @@ class WorkflowRow(QWidget):
         else:
             self._accent.setStyleSheet(
                 f"background-color: {COLOUR.get(self._state.status, COLOUR[ST_UNKNOWN])};")
-            self._info_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
+            self._info_lbl.setStyleSheet(_link_css(FG_MUTED, 11))
             self._name_lbl.setStyleSheet(_link_css(FG_TEXT, 12))
             self._poll_lbl.setStyleSheet(f"color: {FG_MUTED}; font-size: 11px;")
             self._branch_lbl.setStyleSheet(_link_css(FG_MUTED, 11))
@@ -4433,9 +4451,9 @@ class WorkflowRow(QWidget):
         else:
             self._name_lbl.setVisible(True)
 
-            # Branch mode: surface the configured branch as a subtitle so the
-            # row exposes both a workflow-overview click and a run click.
-            if s.branch and s.workflow_url and s.run_url:
+            # Branch mode: surface the branch as a clickable subtitle alongside
+            # the workflow-name title.
+            if s.branch:
                 self._branch_lbl.setText(s.branch)
                 self._branch_lbl.setVisible(True)
             else:
@@ -4453,7 +4471,7 @@ class WorkflowRow(QWidget):
             self._badge_widget.setVisible(self._snoozed)
 
         # Name-label tooltip reflects whichever URL its click currently opens.
-        if s.workflow_url and (s.run_url or s.url):
+        if s.workflow_url:
             self._name_lbl.setToolTip("Open workflow on GitHub")
         else:
             self._name_lbl.setToolTip("Open latest run on GitHub")
