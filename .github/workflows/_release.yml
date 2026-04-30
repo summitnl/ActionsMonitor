@@ -91,7 +91,7 @@ jobs:
           --add-data "config.template.yaml;."
           src/main.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: windows-binary
           path: dist/ActionsMonitor.exe
@@ -129,7 +129,7 @@ jobs:
           --add-data "config.template.yaml:."
           src/main.py
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: linux-binary
           path: dist/ActionsMonitor-linux
