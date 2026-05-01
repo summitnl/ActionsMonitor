@@ -92,7 +92,7 @@ Fill the prompts:
 | `Publisher` | `WizX20` |
 | `PackageName` | `Actions Monitor` |
 | `Moniker` | `actionsmonitor` |
-| `License` | `WizX20 Free Use License` |
+| `License` | `BUSL-1.1` |
 | `ShortDescription` | `Desktop monitor for GitHub Actions workflows and pull requests.` |
 | `Homepage` | `https://github.com/WizX20/ActionsMonitor` |
 | `InstallerType` | `zip` |

@@ -18,7 +18,7 @@ A lightweight tray application that monitors GitHub Actions workflow statuses an
 
 ## License
 
-This project is licensed under the [WizX20 Free Use License](LICENSE). All copies and forks must retain the [NOTICE](NOTICE) file.
+This project is licensed under the [Business Source License 1.1](LICENSE) (BUSL-1.1). Free for personal, internal, academic, and non-commercial redistribution use; resale or paid commercial distribution is not permitted. Converts to Apache 2.0 on the Change Date (2030-05-01). All copies and forks must retain the [NOTICE](NOTICE) file.
 
 ## Requirements
 

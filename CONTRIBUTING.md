@@ -67,4 +67,4 @@ Maintainers only. See [DEVGUIDE.md → Release process](DEVGUIDE.md#release-proc
 
 ## Licence
 
-By contributing you agree that your contribution is licensed under the [WizX20 Free Use License](LICENSE), and that the [NOTICE](NOTICE) file is preserved in any redistribution.
+By contributing you agree that your contribution is licensed under the [Business Source License 1.1](LICENSE) (BUSL-1.1), and that the [NOTICE](NOTICE) file is preserved in any redistribution.
