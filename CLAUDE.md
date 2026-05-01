@@ -22,13 +22,14 @@ When running as a `.exe`, place `config.yaml` next to the executable (project ro
 
 ## Architecture
 
-Three source files:
+Four source files:
 
-- `src/main.py` — config, pollers, widgets, MainWindow, notifications, update flow.
+- `src/main.py` — config, pollers, widgets, MainWindow, notifications, top-level orchestration.
 - `src/icons.py` — all PIL icon rendering (Lucide glyphs, header / reviewer / snooze icons, WizX20 mark, app/tray base icon, `_pil_to_qpixmap` Qt bridge, plus the `_status_qpixmaps` / `_snooze_qpixmaps` / `_base_icon_cache` / `_wizx20_mark_cache` / `_REVIEWER_ICON_B64` caches). Self-contained: owns its own copies of `COLOUR_BG`, the seven status string literals, and the amber `_FG_LINK` default.
 - `src/gh_api.py` — GitHub API plumbing: HTTP layer (`_github_api_get`, `_github_graphql_post`), rate-limit gate (`RateLimited`, cooldown timestamps), ETag conditional-request cache, retry wrapper, URL parsers / builders (`parse_workflow_url`, `_build_workflow_url`, `_build_branch_url`, `parse_actor_url`), endpoint fetchers (`fetch_latest_run`, `fetch_pr_runs`, `fetch_actor_runs`, `fetch_github_username`), username cache + `reset_username_cache()` public hook, generic `_prune_cache` + `_PR_CACHE_MAX` / `_REVIEW_CACHE_MAX` caps, and the PR-review aggregation pipeline (`_compile_bot_regex`, `_aggregate_review_status`, `_cached_review_fetch`, `_cached_unresolved_fetch`). Self-contained: no imports from main.
+- `src/update.py` — release check, download/extract/swap, restart helper, `UpdateChecker` + `UpdateDialog`, `_detect_install_source`, `_cleanup_stale_mei_dirs`. **Self-contained — no compile-time main imports** because PyInstaller re-executes the entry script as both `__main__` and `main`, so `from main import ...` triggers a circular reload. Instead `update.py` declares module-level placeholders and exposes `configure(...)` for one-shot injection of `APP_NAME`, `BUILD_COMMIT`, `IS_WINDOWS`, the theme colours, and `_ClickableLabel`. `main.py` calls `update.configure(...)` once during module init.
 
-Both extracted modules are import-only consumers of `requests` / `PIL` / `PySide6` and pass dependency-check failures through the friendly Qt dialog because their imports sit below the dep-check block in `main.py`.
+All three extracted modules are import-only consumers of `requests` / `PIL` / `PySide6` and pass dependency-check failures through the friendly Qt dialog because their imports sit below the dep-check block in `main.py`.
 
 ### File paths and frozen mode
 
@@ -110,7 +111,7 @@ ActorWorkflowPoller._poll()   # actor mode
 - **`QSystemTrayIcon`** — built into `MainWindow`; coloured PIL icons are converted to `QIcon` via `_pil_to_qpixmap()` and pre-generated at startup.
 - **`StartupManager`** — reads/writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` (Windows only); no admin required.
 - **`NotificationManager`** — `plyer` for toast + `winsound`/`paplay` for sound; runs in a daemon thread so it never blocks pollers. On Windows, winotify toasts include the app icon (`APP_ICO`). Tracks recently notified `(wid, sub_key)` tuples via `_recently_notified` for blink-on-focus. Toast body `launch` points to `_focus.vbs` which creates `_focus_signal`; the main loop polls for this file and calls `_show_window()` + `_blink_row()` on matching rows.
-- **`UpdateChecker`** — on startup (frozen builds only), polls the GitHub Releases API and compares `BUILD_COMMIT` against the latest release. If behind, offers a modal dialog to download and swap the executable.
+- **`UpdateChecker`** + **`UpdateDialog`** — live in `src/update.py`. On startup (frozen builds only), `UpdateChecker.check()` polls the GitHub Releases API and compares `BUILD_COMMIT` against the latest release. If behind, `UpdateDialog` offers a modal flow to download, verify, extract, and swap the executable + `_internal/` folder via a detached helper script. `_detect_install_source()` distinguishes scoop / winget / direct installs and surfaces the appropriate package-manager command instead of swapping in place.
 
 ### Composite keys
 
@@ -171,7 +172,7 @@ Tooltips use Qt's built-in `widget.setToolTip(text)`. Styled via QSS in `DARK_ST
 
 ### Auto-update check
 
-Shortly after the main window appears (via `QTimer.singleShot(1500, ...)`), `UpdateChecker.check()` fetches the latest GitHub Release and compares `target_commitish`/`tag_name` against `BUILD_COMMIT`. If behind, a modal dialog offers to download the matching asset (`ActionsMonitor.exe` on Windows, `ActionsMonitor-linux` on Linux), swap it in, and restart. Downloaded bytes are verified against `asset["size"]` to catch truncation. All network errors are silently ignored so the app always starts. **Only runs when frozen** (`sys.frozen`); source installs update manually via git.
+Shortly after the main window appears (via `QTimer.singleShot(1500, ...)`), `UpdateChecker.check()` (in `src/update.py`) fetches the latest GitHub Release and compares `target_commitish`/`tag_name` against `BUILD_COMMIT`. If behind, `UpdateDialog` offers to download the matching asset (`ActionsMonitor.zip` on Windows, `ActionsMonitor-linux.zip` on Linux), extract to a staging dir, and hand the swap (exe + `_internal/`) off to a detached helper batch/shell script before restarting. Downloaded bytes are verified against `asset["size"]` and (when present) the `sha256:` digest to catch truncation or tamper. All network errors are silently ignored so the app always starts. **Only runs when frozen** (`sys.frozen`); source installs update manually via git.
 
 ## Configuration
 

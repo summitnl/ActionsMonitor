@@ -53,7 +53,7 @@ GitHub Actions builds Windows + Linux binaries on every PR — make sure both jo
 
 ### Code style
 
-- The codebase is split between `src/main.py` (config, pollers, widgets, MainWindow, notifications, update flow) and `src/icons.py` (PIL icon rendering + Qt pixmap caches). Within `main.py`, keep the layout: constants → helpers → classes → `main()`. New low-coupling chunks are candidates for their own module — keep `icons.py`'s pattern of self-contained, no-circular-import design.
+- The codebase is split across four files: `src/main.py` (config, pollers, widgets, MainWindow, notifications, top-level orchestration), `src/icons.py` (PIL icon rendering + Qt pixmap caches), `src/gh_api.py` (GitHub HTTP, rate-limit gate, ETag cache, GraphQL, URL parsers, endpoint fetchers, PR-review aggregation), and `src/update.py` (release check, download/swap flow, `UpdateChecker`, `UpdateDialog`). Within `main.py`, keep the layout: constants → helpers → classes → `main()`. New low-coupling chunks are candidates for their own module; keep the extracted modules' self-contained pattern (no compile-time `from main import ...` — use a `configure()` injection function if shared state is needed, since PyInstaller re-executes the entry script as both `__main__` and `main` and a circular import will break the frozen build).
 - 4-space indentation, `snake_case` for functions and variables, `PascalCase` for classes.
 - Type hints encouraged but not required; match the surrounding style.
 - All GitHub API calls go through `_github_api_get` / `_gh_headers`. Never call `requests.get` against `api.github.com` directly — you'll bypass ETag, cooldown, 401 invalidation, and rate-limit handling.
