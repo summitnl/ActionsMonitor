@@ -48,9 +48,9 @@ scoop install actionsmonitor
 
 ### Direct download
 
-Grab `ActionsMonitor.exe` (Windows) or `ActionsMonitor-linux` from [GitHub Releases](https://github.com/WizX20/ActionsMonitor/releases/latest).
+Grab `ActionsMonitor.zip` (Windows) or `ActionsMonitor-linux.zip` from [GitHub Releases](https://github.com/WizX20/ActionsMonitor/releases/latest). Unzip; the archive contains a single `ActionsMonitor/` (or `ActionsMonitor-linux/`) folder with the executable and an `_internal/` directory of bundled libraries — keep them together. Run the executable inside the folder.
 
-> **Heads up:** the binary is unsigned, so the browser flags the `.exe` as unverified and Windows marks it blocked. Right-click the downloaded file → **Properties** → tick **Unblock** → **OK** before running. Prefer winget or Scoop to skip this step.
+> **Heads up:** the binary is unsigned, so the browser flags the `.zip` as unverified and Windows marks the executable inside as blocked. Right-click the unzipped `.exe` → **Properties** → tick **Unblock** → **OK** before running. Prefer winget or Scoop to skip this step.
 
 ## Getting started
 
@@ -187,7 +187,7 @@ The tray icon follows the same logic, showing the worst state across all configu
 
 ### Updating
 
-Binary builds (the `.exe` / Linux binary) check GitHub Releases shortly after startup. If a newer release is found, a dialog offers to download and install the update in-place, then restart.
+Binary builds (the `.exe` / Linux binary) check GitHub Releases shortly after startup. If a newer release is found, a dialog offers to download the new release zip and swap the executable + `_internal/` libraries in place, then restart. User files in the install folder (`config.yaml`, `state.json`) are preserved across updates.
 
 Running from source does not auto-update — use `git pull` manually.
 
@@ -195,7 +195,7 @@ Running from source does not auto-update — use `git pull` manually.
 
 - **winget:** `winget uninstall WizX20.ActionsMonitor`
 - **Scoop:** `scoop uninstall actionsmonitor`
-- **Direct download:** disable **Start with Windows** in the app footer, then delete the folder.
+- **Direct download:** disable **Start with Windows** in the app footer, then delete the unzipped `ActionsMonitor/` folder.
 
 ## Contributing
 

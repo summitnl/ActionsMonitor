@@ -25,6 +25,7 @@
   ],
   "checkver": "github",
   "autoupdate": {
-    "url": "https://github.com/WizX20/ActionsMonitor/releases/download/v$version/ActionsMonitor.exe"
+    "url": "https://github.com/WizX20/ActionsMonitor/releases/download/v$version/ActionsMonitor.zip",
+    "extract_dir": "ActionsMonitor"
   }
 }

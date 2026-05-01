@@ -51,17 +51,25 @@ jobs:
 
       - name: Build executable
         run: >
-          pyinstaller --onefile --noconsole
+          pyinstaller --onedir --noconsole
           --name ActionsMonitor
           --icon=app.ico
           --add-data "config.template.yaml;."
           src/main.py
 
+      - name: Zip dist
+        shell: pwsh
+        run: |
+          # Wrap the dist folder so the zip contains a top-level "ActionsMonitor/"
+          # directory — required for the winget NestedInstallerFiles RelativeFilePath
+          # and for Scoop's extract_dir to strip cleanly.
+          Compress-Archive -Path dist/ActionsMonitor -DestinationPath dist/ActionsMonitor.zip -Force
+
       - uses: actions/upload-artifact@v7
         if: ${{ inputs.upload_artifacts }}
         with:
           name: windows-binary
-          path: dist/ActionsMonitor.exe
+          path: dist/ActionsMonitor.zip
 
   build-linux:
     runs-on: ubuntu-latest
@@ -98,13 +106,19 @@ jobs:
 
       - name: Build binary
         run: >
-          pyinstaller --onefile
+          pyinstaller --onedir
           --name ActionsMonitor-linux
           --add-data "config.template.yaml:."
           src/main.py
+
+      - name: Zip dist
+        run: |
+          # Wrap the dist folder so the zip contains a top-level
+          # "ActionsMonitor-linux/" directory matching the Windows layout.
+          (cd dist && zip -r ActionsMonitor-linux.zip ActionsMonitor-linux)
 
       - uses: actions/upload-artifact@v7
         if: ${{ inputs.upload_artifacts }}
         with:
           name: linux-binary
-          path: dist/ActionsMonitor-linux
+          path: dist/ActionsMonitor-linux.zip

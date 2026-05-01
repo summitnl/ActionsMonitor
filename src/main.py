@@ -33,6 +33,7 @@ import functools
 import hashlib
 import io
 import tempfile
+import zipfile
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QLabel,
     QVBoxLayout, QHBoxLayout, QFrame, QScrollArea, QCheckBox, QMenu,
@@ -114,6 +115,26 @@ if getattr(sys, "frozen", False):
     _APP_DIR = Path(sys.executable).parent
 else:
     _APP_DIR = Path(__file__).resolve().parent.parent
+
+
+def _bundled(name: str) -> Path:
+    """Resolve a bundled data file (e.g. config.template.yaml).
+
+    Onefile PyInstaller extracts data files to `_APP_DIR` next to the exe (legacy
+    layout) or to `sys._MEIPASS` (the runtime extraction dir). Onedir bundles
+    them inside `_internal/`, which `_MEIPASS` points at. Source runs find them
+    next to the project root. Try `_APP_DIR` first so user-overridable copies win,
+    then fall back to `_MEIPASS`. Caller checks `.exists()` on the result.
+    """
+    primary = _APP_DIR / name
+    if primary.exists():
+        return primary
+    mei = getattr(sys, "_MEIPASS", None)
+    if mei:
+        bundled = Path(mei) / name
+        if bundled.exists():
+            return bundled
+    return primary
 
 # WizX20 logo (docs/wizx20.png resized to 56px height, base64-encoded to avoid bundling issues)
 _WIZX20_LOGO_B64 = (
@@ -954,7 +975,7 @@ class ConfigManager:
 
     def _write_default(self):
         # Copy the commented template if available, otherwise write bare defaults
-        template = _APP_DIR / "config.template.yaml"
+        template = _bundled("config.template.yaml")
         if template.exists():
             shutil.copy2(template, CONFIG_FILE)
             # On Linux, replace Windows-only named sounds with cross-platform defaults
@@ -4766,12 +4787,12 @@ class UpdateChecker:
 
     @staticmethod
     def _apply_release_update(progress_cb=None) -> tuple[bool, str]:
-        """Download the latest release binary to a staging path.
+        """Download the latest release zip and extract to a staging dir.
 
-        Does NOT swap the running executable — swap happens in a detached
-        helper script launched by restart_app() after the current process
-        has exited. Swapping in-place while PyInstaller is still lazy-loading
-        modules corrupts archive reads (zlib "incorrect header check").
+        Does NOT swap files — swap happens in a detached helper script launched
+        by restart_app() after the current process has exited. The running exe
+        and its mapped DLLs in `_internal/` are locked while we're alive, so
+        all moves are deferred to the helper.
         """
         try:
             data = UpdateChecker._release_data
@@ -4785,7 +4806,7 @@ class UpdateChecker:
                     return False, f"Failed to fetch release (HTTP {resp.status_code})"
                 data = resp.json()
 
-            asset_name = "ActionsMonitor.exe" if IS_WINDOWS else "ActionsMonitor-linux"
+            asset_name = "ActionsMonitor.zip" if IS_WINDOWS else "ActionsMonitor-linux.zip"
             asset = next((a for a in data.get("assets", []) if a["name"] == asset_name), None)
             if not asset:
                 return False, f"Asset '{asset_name}' not found in release"
@@ -4799,7 +4820,18 @@ class UpdateChecker:
             if expected_digest.startswith("sha256:"):
                 expected_sha256 = expected_digest.split(":", 1)[1].lower()
             current_exe = Path(sys.executable)
-            tmp_path = current_exe.with_suffix(".update")
+            install_dir = current_exe.parent
+            # Stage on the same volume as the install dir so the helper's
+            # rename/move ops are atomic instead of cross-volume copy+delete.
+            zip_path = install_dir / ".am_update.zip"
+            staging_root = install_dir / ".am_update_staging"
+
+            # Clear any leftovers from a previous failed attempt.
+            try:
+                zip_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            shutil.rmtree(staging_root, ignore_errors=True)
 
             bytes_written = 0
             hasher = hashlib.sha256() if expected_sha256 else None
@@ -4811,7 +4843,7 @@ class UpdateChecker:
             dl = requests.get(download_url, stream=True, timeout=(15, 60))
             try:
                 dl.raise_for_status()
-                with open(tmp_path, "wb") as f:
+                with open(zip_path, "wb") as f:
                     for chunk in dl.iter_content(chunk_size=65536):
                         f.write(chunk)
                         if hasher:
@@ -4829,7 +4861,7 @@ class UpdateChecker:
 
             if expected_size and bytes_written != expected_size:
                 try:
-                    tmp_path.unlink(missing_ok=True)
+                    zip_path.unlink(missing_ok=True)
                 except OSError:
                     pass
                 return False, (
@@ -4840,7 +4872,7 @@ class UpdateChecker:
                 actual_sha256 = hasher.hexdigest()
                 if actual_sha256 != expected_sha256:
                     try:
-                        tmp_path.unlink(missing_ok=True)
+                        zip_path.unlink(missing_ok=True)
                     except OSError:
                         pass
                     return False, (
@@ -4848,10 +4880,50 @@ class UpdateChecker:
                         f"expected {expected_sha256[:12]}…)"
                     )
 
-            if not IS_WINDOWS:
-                tmp_path.chmod(tmp_path.stat().st_mode | stat.S_IEXEC)
+            # Extract zip into staging. Expected layout per the build pipeline:
+            # `<staging_root>/<wrapper>/<exe>` + `<staging_root>/<wrapper>/_internal/...`
+            # where <wrapper> is `ActionsMonitor` (Windows) or `ActionsMonitor-linux`
+            # (Linux). Locate the wrapper by searching for the exe — robust to
+            # future zip-layout tweaks.
+            try:
+                staging_root.mkdir(parents=True, exist_ok=True)
+                with zipfile.ZipFile(zip_path) as zf:
+                    zf.extractall(staging_root)
+            except (zipfile.BadZipFile, OSError) as exc:
+                shutil.rmtree(staging_root, ignore_errors=True)
+                try:
+                    zip_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return False, f"Failed to extract update zip: {exc}"
 
-            UpdateChecker._update_path = tmp_path
+            new_exe = next(
+                (p for p in staging_root.rglob(current_exe.name) if p.is_file()),
+                None,
+            )
+            if new_exe is None or not (new_exe.parent / "_internal").is_dir():
+                shutil.rmtree(staging_root, ignore_errors=True)
+                try:
+                    zip_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                return False, "Update zip layout unexpected (missing exe or _internal/)"
+
+            if not IS_WINDOWS:
+                try:
+                    new_exe.chmod(new_exe.stat().st_mode | stat.S_IEXEC)
+                except OSError:
+                    pass
+
+            # Drop the now-redundant zip — staging dir holds the extracted files.
+            try:
+                zip_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+            # Helper consumes new_exe.parent (the wrapper dir containing the
+            # exe + `_internal/`), not the staging root.
+            UpdateChecker._update_path = new_exe.parent
             UpdateChecker._release_data = None
             return True, "Update downloaded"
         except Exception as exc:
@@ -4861,12 +4933,14 @@ class UpdateChecker:
     def restart_app():
         """Exit the current process and let a detached helper swap + relaunch.
 
-        When an update was downloaded, spawn a platform-specific script that
-        waits for our PID to disappear, swaps the binary, and launches the
-        new exe. Uses os._exit to bypass any Qt event-loop interference.
+        Onedir layout means the swap touches two things — the exe and the
+        `_internal/` directory beside it. Both are locked while we're alive,
+        so all moves run in the helper after our PID exits. Other files in the
+        install dir (`config.yaml`, `state.json`, `app.ico`, `_focus.vbs`) are
+        left untouched.
         """
         update_path = UpdateChecker._update_path
-        staged = update_path is not None and Path(update_path).exists()
+        staged = update_path is not None and Path(update_path).is_dir()
 
         if not staged:
             # No update to apply — fall back to a plain relaunch.
@@ -4877,7 +4951,13 @@ class UpdateChecker:
             os._exit(0)
 
         current_exe = Path(sys.executable)
-        old_path = current_exe.with_suffix(".old")
+        install_dir = current_exe.parent
+        src_exe = update_path / current_exe.name
+        src_internal = update_path / "_internal"
+        dst_internal = install_dir / "_internal"
+        old_exe = install_dir / (current_exe.name + ".old")
+        old_internal = install_dir / "_internal.old"
+        staging_root = update_path.parent  # `.am_update_staging`
         pid = os.getpid()
         tmp_dir = Path(tempfile.gettempdir())
 
@@ -4890,9 +4970,10 @@ class UpdateChecker:
                 'echo === am_update helper starting === > "%LOG%"\r\n'
                 'echo date=%DATE% time=%TIME% >> "%LOG%"\r\n'
                 f'echo pid={pid} >> "%LOG%"\r\n'
+                f'echo install_dir={install_dir} >> "%LOG%"\r\n'
                 f'echo current_exe={current_exe} >> "%LOG%"\r\n'
-                f'echo update_path={update_path} >> "%LOG%"\r\n'
-                f'echo old_path={old_path} >> "%LOG%"\r\n'
+                f'echo src_exe={src_exe} >> "%LOG%"\r\n'
+                f'echo src_internal={src_internal} >> "%LOG%"\r\n'
                 'echo [waiting for pid to exit] >> "%LOG%"\r\n'
                 "set /a wait_tries=0\r\n"
                 ":waitpid\r\n"
@@ -4908,31 +4989,61 @@ class UpdateChecker:
                 "ping -n 3 127.0.0.1 >nul\r\n"
                 ":exited\r\n"
                 'echo [pid exited, attempting swap] >> "%LOG%"\r\n'
+                # Step 1: rename old _internal aside (atomic dir rename, same
+                # volume). Retry briefly because Defender can hold a directory
+                # lock for a beat after the process exits.
                 "set /a tries=0\r\n"
-                ":tryrename\r\n"
-                f'move /y "{current_exe}" "{old_path}" >> "%LOG%" 2>&1\r\n'
+                ":tryren_internal\r\n"
+                f'move /y "{dst_internal}" "{old_internal}" >> "%LOG%" 2>&1\r\n'
                 "if errorlevel 1 (\r\n"
-                '  echo [rename current-^>old failed, try=%tries%] >> "%LOG%"\r\n'
+                '  echo [rename _internal-^>_internal.old failed, try=%tries%] >> "%LOG%"\r\n'
                 "  ping -n 3 127.0.0.1 >nul\r\n"
                 "  set /a tries+=1\r\n"
-                "  if %tries% LSS 30 goto tryrename\r\n"
-                '  echo [FAILED: could not rename current exe after 30 tries] >> "%LOG%"\r\n'
+                "  if %tries% LSS 30 goto tryren_internal\r\n"
+                '  echo [FAILED: could not rename _internal after 30 tries] >> "%LOG%"\r\n'
                 "  exit /b 1\r\n"
                 ")\r\n"
-                'echo [renamed current-^>old, moving new into place] >> "%LOG%"\r\n'
-                f'move /y "{update_path}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                # Step 2: rename old exe aside.
+                "set /a tries=0\r\n"
+                ":tryren_exe\r\n"
+                f'move /y "{current_exe}" "{old_exe}" >> "%LOG%" 2>&1\r\n'
                 "if errorlevel 1 (\r\n"
-                '  echo [FAILED: could not move new into place; restoring backup] >> "%LOG%"\r\n'
-                f'  move /y "{old_path}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                '  echo [rename exe-^>exe.old failed, try=%tries%] >> "%LOG%"\r\n'
+                "  ping -n 3 127.0.0.1 >nul\r\n"
+                "  set /a tries+=1\r\n"
+                "  if %tries% LSS 30 goto tryren_exe\r\n"
+                '  echo [FAILED: could not rename exe; restoring _internal] >> "%LOG%"\r\n'
+                f'  move /y "{old_internal}" "{dst_internal}" >> "%LOG%" 2>&1\r\n'
                 "  exit /b 1\r\n"
                 ")\r\n"
+                # Step 3: move new exe into place.
+                f'move /y "{src_exe}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                "if errorlevel 1 (\r\n"
+                '  echo [FAILED: move new exe; restoring backups] >> "%LOG%"\r\n'
+                f'  move /y "{old_exe}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                f'  move /y "{old_internal}" "{dst_internal}" >> "%LOG%" 2>&1\r\n'
+                "  exit /b 1\r\n"
+                ")\r\n"
+                # Step 4: move new _internal into place.
+                f'move /y "{src_internal}" "{dst_internal}" >> "%LOG%" 2>&1\r\n'
+                "if errorlevel 1 (\r\n"
+                '  echo [FAILED: move new _internal; restoring backups] >> "%LOG%"\r\n'
+                f'  move /y "{current_exe}" "{src_exe}" >> "%LOG%" 2>&1\r\n'
+                f'  move /y "{old_exe}" "{current_exe}" >> "%LOG%" 2>&1\r\n'
+                f'  move /y "{old_internal}" "{dst_internal}" >> "%LOG%" 2>&1\r\n'
+                "  exit /b 1\r\n"
+                ")\r\n"
+                'echo [swap complete; cleaning up backups + staging] >> "%LOG%"\r\n'
+                f'del /q "{old_exe}" >nul 2>&1\r\n'
+                f'rmdir /s /q "{old_internal}" 2>nul\r\n'
+                f'rmdir /s /q "{staging_root}" 2>nul\r\n'
                 # Warmup read forces a synchronous AV scan of the freshly
-                # swapped exe before PyInstaller's bootstrap starts unpacking
-                # to _MEI*. Without it, Defender can lock or quarantine
-                # python312.dll mid-extraction and the relaunch dies with
-                # "Failed to load Python DLL ... module not found".
-                'echo [warming new exe for AV scan] >> "%LOG%"\r\n'
+                # swapped exe + _internal contents before launch. Without it
+                # Defender can lock or quarantine `python312.dll` mid-load and
+                # the relaunch dies with "Failed to load Python DLL".
+                'echo [warming new exe + _internal for AV scan] >> "%LOG%"\r\n'
                 f'type "{current_exe}" > nul 2>&1\r\n'
+                f'for %%F in ("{dst_internal}\\*.dll" "{dst_internal}\\*.pyd") do (type "%%F" > nul 2>&1)\r\n'
                 'ping -n 3 127.0.0.1 >nul\r\n'
                 'echo [launching new exe] >> "%LOG%"\r\n'
                 f'start "" "{current_exe}"\r\n'
@@ -4967,9 +5078,10 @@ class UpdateChecker:
                 'echo "=== am_update helper starting ==="\n'
                 'echo "date=$(date)"\n'
                 f'echo "pid={pid}"\n'
+                f'echo "install_dir={install_dir}"\n'
                 f'echo "current_exe={current_exe}"\n'
-                f'echo "update_path={update_path}"\n'
-                f'echo "old_path={old_path}"\n'
+                f'echo "src_exe={src_exe}"\n'
+                f'echo "src_internal={src_internal}"\n'
                 "echo '[waiting for pid to exit]'\n"
                 "wait_tries=0\n"
                 f"while kill -0 {pid} 2>/dev/null; do\n"
@@ -4983,16 +5095,37 @@ class UpdateChecker:
                 "  sleep 0.5\n"
                 "done\n"
                 "echo '[pid exited, attempting swap]'\n"
-                f'if ! mv -f "{current_exe}" "{old_path}"; then\n'
-                "  echo '[FAILED: rename current->old]'\n"
+                # Step 1: rename _internal aside.
+                f'if ! mv -f "{dst_internal}" "{old_internal}"; then\n'
+                "  echo '[FAILED: rename _internal->_internal.old]'\n"
                 "  exit 1\n"
                 "fi\n"
-                f'if ! mv -f "{update_path}" "{current_exe}"; then\n'
-                "  echo '[FAILED: move new into place; restoring backup]'\n"
-                f'  mv -f "{old_path}" "{current_exe}"\n'
+                # Step 2: rename exe aside.
+                f'if ! mv -f "{current_exe}" "{old_exe}"; then\n'
+                "  echo '[FAILED: rename exe; restoring _internal]'\n"
+                f'  mv -f "{old_internal}" "{dst_internal}"\n'
+                "  exit 1\n"
+                "fi\n"
+                # Step 3: move new exe in.
+                f'if ! mv -f "{src_exe}" "{current_exe}"; then\n'
+                "  echo '[FAILED: move new exe; restoring backups]'\n"
+                f'  mv -f "{old_exe}" "{current_exe}"\n'
+                f'  mv -f "{old_internal}" "{dst_internal}"\n'
+                "  exit 1\n"
+                "fi\n"
+                # Step 4: move new _internal in.
+                f'if ! mv -f "{src_internal}" "{dst_internal}"; then\n'
+                "  echo '[FAILED: move new _internal; restoring backups]'\n"
+                f'  mv -f "{current_exe}" "{src_exe}"\n'
+                f'  mv -f "{old_exe}" "{current_exe}"\n'
+                f'  mv -f "{old_internal}" "{dst_internal}"\n'
                 "  exit 1\n"
                 "fi\n"
                 f'chmod +x "{current_exe}"\n'
+                "echo '[swap complete; cleaning up backups + staging]'\n"
+                f'rm -f "{old_exe}"\n'
+                f'rm -rf "{old_internal}"\n'
+                f'rm -rf "{staging_root}"\n'
                 # Warmup read + brief settle — mirror of the Windows helper.
                 # Most Linux AVs are passive but the read keeps inotify watchers
                 # quiet and gives the FS a moment to flush after the rename.
@@ -6294,11 +6427,30 @@ class MainWindow(QMainWindow):
 # ---------------------------------------------------------------------------
 def main():
     if getattr(sys, "frozen", False):
+        exe = Path(sys.executable)
+        install_dir = exe.parent
+        # Remove leftovers from prior update attempts: legacy onefile sidecars
+        # (`exe.old`, `exe.update`), the new onedir backups (`exe.exe.old`,
+        # `_internal.old`), staging artifacts (`.am_update.zip`,
+        # `.am_update_staging/`), and any stale `_MEI*` dirs in temp.
         for suffix in (".old", ".update"):
             try:
-                Path(sys.executable).with_suffix(suffix).unlink(missing_ok=True)
+                exe.with_suffix(suffix).unlink(missing_ok=True)
             except OSError:
                 pass
+        for leftover in (
+            install_dir / (exe.name + ".old"),
+            install_dir / ".am_update.zip",
+        ):
+            try:
+                leftover.unlink(missing_ok=True)
+            except OSError:
+                pass
+        for leftover_dir in (
+            install_dir / "_internal.old",
+            install_dir / ".am_update_staging",
+        ):
+            shutil.rmtree(leftover_dir, ignore_errors=True)
         _cleanup_stale_mei_dirs()
 
     if IS_WINDOWS:

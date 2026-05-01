@@ -24,20 +24,20 @@ Requires Python 3.10+.
 
 ## Building from source
 
-### Windows — `ActionsMonitor.exe`
+### Windows — `ActionsMonitor.zip`
 
 ```bat
 src\build.bat
 ```
 
-Runs PyInstaller with `--onefile --noconsole`, embeds `app.ico`, bundles `config.template.yaml`, and drops the exe in the repo root.
+Runs PyInstaller with `--onedir --noconsole`, embeds `app.ico`, bundles `config.template.yaml`, drops the dist folder in `dist/ActionsMonitor/` (exe + `_internal/`), and zips it to `ActionsMonitor.zip` in the repo root. The zip wraps a top-level `ActionsMonitor/` folder so the layout matches what winget's `NestedInstallerFiles.RelativeFilePath` and Scoop's `extract_dir` expect.
 
-### Linux — `ActionsMonitor-linux`
+### Linux — `ActionsMonitor-linux.zip`
 
 Build via WSL (Ubuntu 24.04). The Windows filesystem has permission issues with PyInstaller, so copy to `/tmp` first:
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onefile --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && cp /tmp/am-build/dist/ActionsMonitor-linux /mnt/c/Repos/ActionsMonitor/ && rm -rf /tmp/am-build"
+wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onedir --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && (cd /tmp/am-build/dist && zip -r ActionsMonitor-linux.zip ActionsMonitor-linux) && cp /tmp/am-build/dist/ActionsMonitor-linux.zip /mnt/c/Repos/ActionsMonitor/ && rm -rf /tmp/am-build"
 ```
 
 Ubuntu 24.04 prerequisites:
@@ -53,9 +53,9 @@ Releases are driven by `.github/workflows/release.yml` (manual dispatch only). T
 
 1. **`check`** — first verifies that the latest completed CI run on `main` is `success` (`gh run list -w ci.yml -b main --status completed -L 1`); aborts the release if not. Then compares HEAD to the latest release's `targetCommitish`; skips if identical.
 2. **`build`** — calls the reusable `_build.yml` workflow (shared with CI). Runs PyInstaller on `windows-latest` / `ubuntu-latest`; embeds a 7-char commit SHA into `src/version.py`.
-3. **`release`** — tags `v$(date -u +%Y.%m.%d)`, deletes any same-day tag, creates the GitHub Release with `ActionsMonitor.exe` + `ActionsMonitor-linux` attached, and uses the first dated block of `CHANGELOG.md` as the release body.
-4. **`update-scoop`** — computes the SHA256 of the uploaded exe, bumps `bucket/actionsmonitor.json` (version, URL, hash), and commits back to `main`.
-5. **`update-winget`** — runs `wingetcreate update WizX20.ActionsMonitor` on the new release URL and submits a PR to `microsoft/winget-pkgs`.
+3. **`release`** — tags `v$(date -u +%Y.%m.%d)`, deletes any same-day tag, creates the GitHub Release with `ActionsMonitor.zip` + `ActionsMonitor-linux.zip` attached, and uses the first dated block of `CHANGELOG.md` as the release body.
+4. **`update-scoop`** — computes the SHA256 of the uploaded zip, bumps `bucket/actionsmonitor.json` (version, URL, hash, `extract_dir`), and commits back to `main`.
+5. **`update-winget`** — runs `wingetcreate update WizX20.ActionsMonitor` on the new zip URL and submits a PR to `microsoft/winget-pkgs`.
 
 ### CI workflow
 
@@ -76,11 +76,11 @@ A PR with a failing CI run is then blocked from merging. Names appear in the pic
 
 ### First-time winget bootstrap
 
-The automated `update-winget` job only works once `WizX20.ActionsMonitor` exists in `microsoft/winget-pkgs`. Do the first submission manually from a Windows box, against the first WizX20 release URL:
+The automated `update-winget` job only works once `WizX20.ActionsMonitor` exists in `microsoft/winget-pkgs`. Do the first submission manually from a Windows box, against the first WizX20 zip release URL:
 
 ```powershell
 winget install Microsoft.WingetCreate
-wingetcreate new https://github.com/WizX20/ActionsMonitor/releases/download/v<TAG>/ActionsMonitor.exe
+wingetcreate new https://github.com/WizX20/ActionsMonitor/releases/download/v<TAG>/ActionsMonitor.zip
 ```
 
 Fill the prompts:
@@ -95,7 +95,9 @@ Fill the prompts:
 | `License` | `WizX20 Free Use License` |
 | `ShortDescription` | `Desktop monitor for GitHub Actions workflows and pull requests.` |
 | `Homepage` | `https://github.com/WizX20/ActionsMonitor` |
-| `InstallerType` | `portable` |
+| `InstallerType` | `zip` |
+| `NestedInstallerType` | `portable` |
+| `NestedInstallerFiles[0].RelativeFilePath` | `ActionsMonitor/ActionsMonitor.exe` |
 | `Commands` | `actionsmonitor` |
 
 Then `wingetcreate submit --token <PAT>`. Initial review can take days; subsequent CI-submitted PRs often merge within hours.
