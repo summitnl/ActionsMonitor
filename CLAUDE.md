@@ -214,12 +214,12 @@ When adding features, always add a dated changelog entry to `CHANGELOG.md`. Do n
 
 ### Building
 
-**Windows:** `src\build.bat` runs PyInstaller to produce `ActionsMonitor.exe` in the project root. Build artifacts (`build/`, `*.spec`, `*.exe`) are gitignored.
+**Windows:** `src\build.bat` runs PyInstaller `--onedir --noconsole` and produces `dist/ActionsMonitor/` (exe + `_internal/`) plus `ActionsMonitor.zip` in the project root. Build artifacts (`build/`, `dist/`, `*.spec`) are gitignored.
 
 **Linux:** Build via WSL (Ubuntu-24.04). The Windows filesystem (`/mnt/c`) has permission issues with PyInstaller, so copy to `/tmp` first:
 
 ```bash
-wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onefile --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && cp /tmp/am-build/dist/ActionsMonitor-linux /mnt/c/Repos/ActionsMonitor/ && rm -rf /tmp/am-build"
+wsl -d Ubuntu-24.04 -- bash -c "cp -r /mnt/c/Repos/ActionsMonitor /tmp/am-build && cd /tmp/am-build && ~/.local/bin/pyinstaller --onedir --name ActionsMonitor-linux --add-data 'config.template.yaml:.' src/main.py && (cd /tmp/am-build/dist && zip -r ActionsMonitor-linux.zip ActionsMonitor-linux) && cp /tmp/am-build/dist/ActionsMonitor-linux.zip /mnt/c/Repos/ActionsMonitor/ && rm -rf /tmp/am-build"
 ```
 
 **Prerequisites (Ubuntu 24.04):**

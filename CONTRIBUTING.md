@@ -53,7 +53,7 @@ GitHub Actions builds Windows + Linux binaries on every PR — make sure both jo
 
 ### Code style
 
-- The codebase intentionally lives in a single file (`src/main.py`). Keep the layout: constants → helpers → classes → `main()`.
+- The codebase is split between `src/main.py` (config, pollers, widgets, MainWindow, notifications, update flow) and `src/icons.py` (PIL icon rendering + Qt pixmap caches). Within `main.py`, keep the layout: constants → helpers → classes → `main()`. New low-coupling chunks are candidates for their own module — keep `icons.py`'s pattern of self-contained, no-circular-import design.
 - 4-space indentation, `snake_case` for functions and variables, `PascalCase` for classes.
 - Type hints encouraged but not required; match the surrounding style.
 - All GitHub API calls go through `_github_api_get` / `_gh_headers`. Never call `requests.get` against `api.github.com` directly — you'll bypass ETag, cooldown, 401 invalidation, and rate-limit handling.
