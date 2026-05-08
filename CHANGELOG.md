@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-05-07
+
+- **URL mode now fetches CI status** — `URLQueryPoller` previously derived row status from review state only (approved → success, changes-requested → failure, else unknown), so the row icon always read "Unknown" while a build was actually green/red and the subtitle linked to the PR page instead of the latest run. Added `gh_api.fetch_runs_by_sha()` and a per-poller `_fetch_latest_run_for_sha()`; PR detail now caches `head_sha`, the poller fetches `/actions/runs?head_sha=<sha>&per_page=1` for each PR, and the resulting `run_id` / `run_url` / `run_number` / `started_at` / `run_updated_at` populate `WorkflowState`. Row status now comes from the CI run; the review badge still surfaces approval state separately. Side effect: URL-section CI failures now escalate the tray colour (previously muted by design).
+
 ### 2026-05-06
 
 - **Daily Build no longer self-perpetuates via Scoop manifest bump** — `_release.yml`'s `check` job compared `git rev-parse HEAD` against the latest release's `targetCommitish`, but the `update-scoop` job pushes `bucket/actionsmonitor.json` to `main` after every release. Result: each Daily Build saw "main moved" (the bot's scoop bump from yesterday), built a fresh release, and the cycle repeated forever — releases page showed a new tag every morning even when no human had committed. The `check` step now runs `git diff --name-only LATEST HEAD -- . ':(exclude)bucket/actionsmonitor.json'`; if the only change since the last release is the scoop manifest, `should_build=false` and the run skips cleanly. Manual `workflow_dispatch` of `Release` is unaffected because real commits land outside the exclude path.

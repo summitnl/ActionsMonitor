@@ -499,6 +499,20 @@ def fetch_pr_runs(
     return _github_api_get(api_url, token, session, params).get("workflow_runs", [])
 
 
+def fetch_runs_by_sha(
+    owner: str,
+    repo: str,
+    head_sha: str,
+    token: str,
+    per_page: int = 1,
+    session: Optional[requests.Session] = None,
+) -> list[dict]:
+    """Fetch workflow runs for a specific commit SHA (newest first)."""
+    api_url = f"https://api.github.com/repos/{owner}/{repo}/actions/runs"
+    params: dict = {"head_sha": head_sha, "per_page": per_page}
+    return _github_api_get(api_url, token, session, params).get("workflow_runs", [])
+
+
 def fetch_actor_runs(
     owner: str,
     repo: str,

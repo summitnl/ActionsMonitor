@@ -39,6 +39,7 @@ from gh_api import (
     fetch_github_username,
     fetch_latest_run,
     fetch_pr_runs,
+    fetch_runs_by_sha,
     parse_actor_url,
     parse_workflow_url,
 )
@@ -1230,13 +1231,16 @@ class URLQueryPoller(WorkflowPoller):
             review_status, review_by_bot = self._fetch_review_status(
                 owner, repo, pr_num, token, bot_regex)
 
-            row_status = ST_UNKNOWN
-            if review_status == "approved":
-                row_status = ST_SUCCESS
-            elif review_status == "changes_requested":
-                row_status = ST_FAILURE
-
             head_branch = (pr_detail or {}).get("head_ref", "")
+            head_sha    = (pr_detail or {}).get("head_sha", "")
+            latest_run = self._fetch_latest_run_for_sha(
+                owner, repo, head_sha, token) if head_sha else None
+
+            if latest_run is not None:
+                row_status = _resolve_status(
+                    latest_run.get("status"), latest_run.get("conclusion"))
+            else:
+                row_status = ST_UNKNOWN
 
             state = WorkflowState(
                 name=f"{owner}/{repo}",
@@ -1247,6 +1251,13 @@ class URLQueryPoller(WorkflowPoller):
             )
             state.last_check    = now
             state.status        = row_status
+            if latest_run is not None:
+                state.run_id         = latest_run.get("id")
+                state.run_url        = latest_run.get("html_url")
+                state.run_number     = latest_run.get("run_number")
+                state.started_at     = (latest_run.get("run_started_at")
+                                        or latest_run.get("created_at"))
+                state.run_updated_at = latest_run.get("updated_at")
             state.pr_number     = pr_num
             state.pr_title      = item.get("title") or None
             state.pr_url        = item.get("html_url", "")
@@ -1298,11 +1309,22 @@ class URLQueryPoller(WorkflowPoller):
             "draft":    data.get("draft", False),
             "base_ref": data.get("base", {}).get("ref", ""),
             "head_ref": data.get("head", {}).get("ref", ""),
+            "head_sha": data.get("head", {}).get("sha", ""),
             "mergeable_state": data.get("mergeable_state", "unknown"),
         }
         self._pr_cache[key] = detail
         _prune_cache(self._pr_cache, _PR_CACHE_MAX)
         return detail
+
+    def _fetch_latest_run_for_sha(self, owner: str, repo: str,
+                                  head_sha: str, token: str) -> Optional[dict]:
+        """Fetch the most recent workflow run for a commit. ETag layer dedupes."""
+        try:
+            runs = fetch_runs_by_sha(
+                owner, repo, head_sha, token, per_page=1, session=self._session)
+        except Exception:
+            return None
+        return runs[0] if runs else None
 
     def _fetch_review_status(self, owner: str, repo: str, pr_num: int, token: str,
                              bot_regex: Optional[re.Pattern] = None
