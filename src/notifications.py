@@ -115,6 +115,7 @@ class _PendingNotification:
     sound_cfg:  str
     url:        Optional[str]
     row_keys:   list[tuple[int, Optional[str]]]
+    line:       Optional[str] = None   # single-line summary for multi-event toasts
 
 
 class NotificationManager:
@@ -146,7 +147,8 @@ class NotificationManager:
 
     def notify(self, title: str, message: str, sound_cfg: str,
                url: Optional[str] = None, notif_type: str = "new_run",
-               row_keys: Optional[list[tuple[int, Optional[str]]]] = None):
+               row_keys: Optional[list[tuple[int, Optional[str]]]] = None,
+               line: Optional[str] = None):
         with self._lock:
             if self._batch_window <= 0:
                 # Batching disabled — fire immediately (old behaviour)
@@ -156,7 +158,8 @@ class NotificationManager:
                     daemon=True,
                 ).start()
                 return
-            self._pending.append(_PendingNotification(notif_type, title, message, sound_cfg, url, row_keys or []))
+            self._pending.append(_PendingNotification(
+                notif_type, title, message, sound_cfg, url, row_keys or [], line))
             if self._flush_timer is None:
                 self._flush_timer = threading.Timer(self._batch_window, self._flush)
                 self._flush_timer.daemon = True
@@ -181,7 +184,7 @@ class NotificationManager:
             ).start()
             return
 
-        # Multiple notifications — combine into one
+        # Multiple notifications — combine into one with summary header + per-event lines
         counts: dict[str, int] = {}
         for item in batch:
             counts[item.notif_type] = counts.get(item.notif_type, 0) + 1
@@ -191,16 +194,30 @@ class NotificationManager:
             "new_run": "\u25b6 {n} started",
             "success": "\u2713 {n} succeeded",
         }
-        parts = []
+        summary_parts = []
         for ntype in ("failure", "new_run", "success"):
             if ntype in counts:
-                parts.append(type_labels[ntype].format(n=counts[ntype]))
+                summary_parts.append(type_labels[ntype].format(n=counts[ntype]))
+        summary = "  \u2022  ".join(summary_parts)
 
-        title = f"{sum(counts.values())} workflow notifications"
-        body = "  \u2022  ".join(parts)
+        title = f"{sum(counts.values())} workflow updates"
+
+        # Sort events by priority (failure first) for the per-line list, then
+        # truncate so winotify body stays readable (~4 visible lines on Win 11).
+        prio = _NOTIF_TYPE_PRIORITY
+        ordered = sorted(batch, key=lambda i: -prio.get(i.notif_type, 0))
+        max_lines = 4
+        event_lines = [(it.line or it.message.splitlines()[0]) for it in ordered]
+        body_lines = [summary]
+        if len(event_lines) <= max_lines:
+            body_lines.extend(event_lines)
+        else:
+            body_lines.extend(event_lines[:max_lines])
+            body_lines.append(f"\u2026 and {len(event_lines) - max_lines} more")
+        body = "\n".join(body_lines)
 
         # Pick sound from highest-priority notification type
-        best = max(batch, key=lambda i: _NOTIF_TYPE_PRIORITY.get(i.notif_type, 0))
+        best = max(batch, key=lambda i: prio.get(i.notif_type, 0))
         sound = best.sound_cfg
 
         # URL: use the first failure's URL, or first item's

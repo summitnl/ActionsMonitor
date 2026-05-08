@@ -443,19 +443,70 @@ class WorkflowPoller(threading.Thread):
             return
         sound = section.get("sound", "default")
 
-        titles = {
-            "new_run": f"\u25b6 New run started",
-            "success": f"\u2713 Run succeeded",
-            "failure": f"\u2717 Run failed",
-        }
-        messages = {
-            "new_run": f"{state.name}  \u2022  Run #{state.run_number}",
-            "success": f"{state.name}  \u2022  Run #{state.run_number}",
-            "failure": f"{state.name}  \u2022  Run #{state.run_number}",
-        }
-        url = state.run_url or state.url
-        NOTIF.notify(titles[notif_type], messages[notif_type], sound, url=url, notif_type=notif_type,
-                     row_keys=[(self.wid, sub_key)])
+        title, message, line = self._build_notification(notif_type, state, is_pr=is_pr)
+        url = state.run_url or state.pr_url or state.url
+        NOTIF.notify(title, message, sound, url=url, notif_type=notif_type,
+                     row_keys=[(self.wid, sub_key)], line=line)
+
+    @staticmethod
+    def _build_notification(notif_type: str, state: WorkflowState, is_pr: bool
+                            ) -> tuple[str, str, str]:
+        """Return (title, body, single-line summary) for a notification.
+
+        Body is multi-line; line is what shows up when several notifications are
+        batched together into one toast. No extra API calls — uses only fields
+        already populated on `state`.
+        """
+        sym = {"new_run": "\u25b6", "success": "\u2713", "failure": "\u2717"}[notif_type]
+        verb = {"new_run": "started", "success": "succeeded", "failure": "failed"}[notif_type]
+
+        # Build branch label once — prefix/short available in PR/actor mode, plain branch in branch mode.
+        if state.branch_prefix and state.branch_short:
+            branch_lbl = f"{state.branch_prefix}/{state.branch_short}"
+        else:
+            branch_lbl = state.branch_short or state.branch or state.head_branch or ""
+
+        run_tag = f"#{state.run_number}" if state.run_number else ""
+
+        if is_pr and state.pr_number:
+            title = f"{sym} {state.name} {verb}"
+            body_lines: list[str] = []
+            if state.pr_title:
+                pr_t = state.pr_title if len(state.pr_title) <= 60 else state.pr_title[:57] + "\u2026"
+                body_lines.append(f"PR #{state.pr_number} {pr_t}")
+            else:
+                body_lines.append(f"PR #{state.pr_number}")
+            if branch_lbl and state.pr_target:
+                body_lines.append(f"{branch_lbl} \u2192 {state.pr_target}")
+            elif branch_lbl:
+                body_lines.append(branch_lbl)
+            tail = f"Run {run_tag}" if run_tag else ""
+            if state.jira_key:
+                tail = f"{state.jira_key}  \u2022  {tail}".strip(" \u2022 ")
+            if tail:
+                body_lines.append(tail)
+            line = f"{sym} {state.name}: PR #{state.pr_number}"
+            if branch_lbl:
+                line += f" ({branch_lbl})"
+            return title, "\n".join(body_lines), line
+
+        title = f"{sym} {state.name} {verb}"
+        body_lines = []
+        if branch_lbl:
+            body_lines.append(branch_lbl)
+        tail = f"Run {run_tag}" if run_tag else ""
+        if state.jira_key:
+            tail = f"{state.jira_key}  \u2022  {tail}".strip(" \u2022 ")
+        if tail:
+            body_lines.append(tail)
+        if not body_lines:
+            body_lines.append(state.name)
+        line = f"{sym} {state.name}"
+        if branch_lbl:
+            line += f": {branch_lbl}"
+        if run_tag:
+            line += f" {run_tag}"
+        return title, "\n".join(body_lines), line
 
 
 # ---------------------------------------------------------------------------
