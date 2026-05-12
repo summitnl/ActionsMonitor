@@ -561,7 +561,7 @@ class UpdateDialog(QDialog):
 
     def __init__(self, commit_hash: str, parent=None):
         super().__init__(parent)
-        self.setWindowTitle(f"{APP_NAME} — Update Available")
+        self.setWindowTitle(f"{APP_NAME} - Update Available")
 
         source = _detect_install_source()
         managed_cmd = _MANAGED_UPGRADE_CMD.get(source)
@@ -677,7 +677,7 @@ class UpdateDialog(QDialog):
         if ok:
             self._progress_bar.setRange(0, 1)
             self._progress_bar.setValue(1)
-            self._status_lbl.setText("Update complete — restarting...")
+            self._status_lbl.setText("Update complete - restarting...")
             self._status_lbl.setStyleSheet(f"color: {_COLOR_SUCCESS}; font-size: 12px;")
             QTimer.singleShot(500, UpdateChecker.restart_app)
         else:

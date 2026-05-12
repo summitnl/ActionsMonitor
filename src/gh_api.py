@@ -296,7 +296,7 @@ class RateLimited(Exception):
     """Raised by _github_api_get while the cooldown gate is active."""
     def __init__(self, retry_after: float, reason: str = ""):
         super().__init__(
-            f"GitHub rate limited — retry in {int(retry_after)}s ({reason})"
+            f"GitHub rate limited - retry in {int(retry_after)}s ({reason})"
         )
         self.retry_after = retry_after
         self.reason = reason
@@ -349,11 +349,11 @@ def _friendly_error(exc: BaseException) -> str:
     text that ends up in the row when GitHub drops a keep-alive socket.
     """
     if isinstance(exc, requests.ConnectionError):
-        return "Connection lost — retrying"
+        return "Connection lost - retrying"
     if isinstance(exc, requests.Timeout):
-        return "Request timed out — retrying"
+        return "Request timed out - retrying"
     if isinstance(exc, requests.RequestException):
-        return "Network error — retrying"
+        return "Network error - retrying"
     msg = str(exc) or exc.__class__.__name__
     return msg if len(msg) <= 120 else msg[:117] + "…"
 

@@ -297,7 +297,7 @@ class WorkflowRow(QWidget):
         self._snooze_btn.setPixmap(_snooze_qpixmaps.get("normal", QPixmap()))
         self._snooze_btn.setFixedSize(16, 16)
         self._snooze_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._snooze_btn.setToolTip("Snooze \u2014 pause polling, dim the row, mute notifications")
+        self._snooze_btn.setToolTip("Snooze - pause polling, dim the row, mute notifications")
         self._snooze_btn.mousePressEvent = lambda e: self._toggle_snooze()
         self._snooze_btn.enterEvent = lambda e: self._snooze_hover_enter()
         self._snooze_btn.leaveEvent = lambda e: self._snooze_hover_leave()
@@ -359,8 +359,8 @@ class WorkflowRow(QWidget):
     def set_snoozed(self, snoozed: bool):
         self._snoozed = snoozed
         self._snooze_btn.setToolTip(
-            "Unsnooze \u2014 resume polling and notifications" if snoozed
-            else "Snooze \u2014 pause polling, dim the row, mute notifications")
+            "Unsnooze - resume polling and notifications" if snoozed
+            else "Snooze - pause polling, dim the row, mute notifications")
         dim_text = "#57534E"
         dim_muted = "#44403C"
         if snoozed:
@@ -424,7 +424,7 @@ class WorkflowRow(QWidget):
         if s.error:
             status_txt = f"Error: {s.error}"
         elif s.run_number:
-            status_txt = f"{status_txt}  \u2014  run #{s.run_number}"
+            status_txt = f"{status_txt} - run #{s.run_number}"
             if s.started_at:
                 try:
                     dt = datetime.fromisoformat(s.started_at.replace("Z", "+00:00"))

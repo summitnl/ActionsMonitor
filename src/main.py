@@ -54,7 +54,7 @@ if _missing:
     _app = QApplication(sys.argv)
     QMessageBox.critical(
         None,
-        "Actions Monitor — Missing Dependencies",
+        "Actions Monitor - Missing Dependencies",
         "Please install the required packages:\n\n"
         f"  pip install {' '.join(_missing)}\n\n"
         "Then restart the application.",
@@ -1408,7 +1408,7 @@ class MainWindow(QMainWindow):
             return
         self._prev_tray_status = combined
         self._tray.setIcon(self._tray_icons.get(combined, self._tray_icons[ST_UNKNOWN]))
-        self._tray.setToolTip(f"{APP_NAME} — {combined.replace('_', ' ').title()}")
+        self._tray.setToolTip(f"{APP_NAME} - {combined.replace('_', ' ').title()}")
 
     # ------------------------------------------------------------------
     # Startup toggle
@@ -2209,7 +2209,7 @@ def main():
     if IS_LINUX and LINUX_MISSING:
         QMessageBox.warning(
             None,
-            "Actions Monitor — Missing System Libraries",
+            "Actions Monitor - Missing System Libraries",
             "The following system packages are missing:\n\n"
             + "\n".join(f"  • {p}" for p in LINUX_MISSING)
             + "\n\nNotification sounds may not work.",

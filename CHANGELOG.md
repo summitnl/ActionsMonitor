@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-05-12
+
+- **Replaced em-dash with hyphen across all UI-visible strings** — `WorkflowRow._update_labels` status-info line (`Success  —  run #9638` → `Success - run #9638`), snooze tooltips, `UpdateDialog` window title + completion label, `URLQueryPoller` "Cannot resolve @me" error, `gh_api` rate-limit + network error strings shown in row info lines, tray tooltip (`{APP_NAME} — Success` → `{APP_NAME} - Success`), and missing-deps / missing-libraries dialog titles. Comments and docstrings still use em-dashes. Avoids AI-stylised punctuation in user-facing copy.
+
 ### 2026-05-08
 
 - **Richer notification content + multi-event toast aggregation** — single notifications now include PR title, branch (with prefix), `→ target` for PR mode, and the Jira key parsed from the branch — previously the body was just `{workflow_name}  •  Run #{n}`. Title now embeds workflow name + verb (`✗ Acceptance failed`). Batched toasts (when multiple notifications coalesce inside `notifications.batch_window`) now render a header summary line (`✗ 2 failed  •  ▶ 1 started`) followed by per-event lines (up to 4, then `… and N more`), sorted failure → new_run → success. Added a `line` field on `_PendingNotification` carrying the single-line summary; `WorkflowPoller._build_notification(notif_type, state, is_pr)` produces `(title, body, line)` from existing `WorkflowState` fields — no extra API calls. Toast-click URL falls back to `state.pr_url` when `state.run_url` isn't set.

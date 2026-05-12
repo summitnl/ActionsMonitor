@@ -1225,7 +1225,7 @@ class URLQueryPoller(WorkflowPoller):
                 self._emit_error(f"Cannot resolve @me: {_friendly_error(exc)}")
                 return
             if not username:
-                self._emit_error("Cannot resolve @me — no user")
+                self._emit_error("Cannot resolve @me - no user")
                 return
             query = query.replace("@me", username)
 
