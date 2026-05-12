@@ -2,6 +2,8 @@
 
 ### 2026-05-12
 
+- **Release notes shown in update dialog** — `UpdateDialog` now renders the GitHub release `body` markdown via a `QTextBrowser` placed between the version/link block and the managed-cmd / status block. Source is `UpdateChecker._release_data["body"]` (already cached by `_check_release()`, no extra API call). Uses Qt's built-in CommonMark renderer (`setMarkdown`), dark-theme QSS (`BG_ROW` bg, `FG_TEXT` fg, `FG_LINK` for `a`), 150px fixed height with vertical scroll, external links open in browser. When the release body is empty the widget is hidden and the dialog stays its original 420×260/280 size; when present it grows to 480 wide and adds 170px height. Both install paths (direct Update/Skip + managed-install Copy/Close) show notes. Users can now see what's changing before clicking Update.
+
 - **Replaced em-dash with hyphen across all UI-visible strings** — `WorkflowRow._update_labels` status-info line (`Success  —  run #9638` → `Success - run #9638`), snooze tooltips, `UpdateDialog` window title + completion label, `URLQueryPoller` "Cannot resolve @me" error, `gh_api` rate-limit + network error strings shown in row info lines, tray tooltip (`{APP_NAME} — Success` → `{APP_NAME} - Success`), and missing-deps / missing-libraries dialog titles. Comments and docstrings still use em-dashes. Avoids AI-stylised punctuation in user-facing copy.
 
 ### 2026-05-08

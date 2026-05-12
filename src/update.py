@@ -28,7 +28,7 @@ import requests
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication, QDialog, QHBoxLayout, QLabel, QProgressBar, QPushButton,
-    QVBoxLayout,
+    QTextBrowser, QVBoxLayout,
 )
 
 
@@ -565,7 +565,10 @@ class UpdateDialog(QDialog):
 
         source = _detect_install_source()
         managed_cmd = _MANAGED_UPGRADE_CMD.get(source)
-        self.setFixedSize(420, 280 if managed_cmd else 260)
+
+        notes_body = ((UpdateChecker._release_data or {}).get("body") or "").strip()
+        base_h = 280 if managed_cmd else 260
+        self.setFixedSize(480 if notes_body else 420, base_h + (170 if notes_body else 0))
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -583,6 +586,19 @@ class UpdateDialog(QDialog):
         link = _ClickableLabel("View release on GitHub", url_fn=lambda: link_url)
         link.setStyleSheet(f"color: {FG_LINK}; font-size: 12px; text-decoration: underline;")
         layout.addWidget(link)
+
+        if notes_body:
+            notes = QTextBrowser()
+            notes.setMarkdown(notes_body)
+            notes.setOpenExternalLinks(True)
+            notes.setFixedHeight(150)
+            notes.setStyleSheet(
+                f"QTextBrowser {{ background-color: {BG_ROW}; color: {FG_TEXT}; "
+                f"border: none; border-radius: 3px; padding: 6px 8px; "
+                f"font-size: 12px; }}"
+                f"QTextBrowser a {{ color: {FG_LINK}; }}"
+            )
+            layout.addWidget(notes)
 
         if managed_cmd:
             mgr_label = {"scoop": "Scoop", "winget": "winget"}[source]
