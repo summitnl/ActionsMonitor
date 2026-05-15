@@ -1,5 +1,9 @@
 # Changelog
 
+### 2026-05-15
+
+- **Daily Build retries on transient runner starvation** — today's scheduled run (`25906763857`) failed because the `release / check` job sat in `queued` for ~23 minutes without ever being assigned an `ubuntu-latest` runner; GitHub eventually gave up, dependents were skipped, and the run was marked `failure`. `build.yml` now schedules two follow-up crons at 06:00 and 07:00 UTC (in addition to the original 05:00). The `_release.yml` `check` job is already idempotent — once HEAD equals the latest release's `target_commitish`, `should_build=false` short-circuits the build/release/scoop jobs — so a successful first run turns subsequent retries into ~10-second no-ops. No retry-state file or external coordination needed.
+
 ### 2026-05-12
 
 - **`ignore_workflows` opt-out (PR mode)** — sibling of `extra_workflows` for silencing small / shadow-IT workflows that piggyback on a PR. Two independent switches per entry: `status` (drop run from row colour + representative-run pick) and `notifications` (drop run from notification transition tracking). Short form (`- some-check.yml`) ignores both; granular form takes a dict (`file:` plus optional `status:` / `notifications:`, default true each). `PRWorkflowPoller.__init__` parses `cfg_entry["ignore_workflows"]` into two sets via `_parse_ignore_workflows()`; `_poll()` partitions each PR's `group_runs` into `status_runs` + `notif_runs` (matched by workflow-file basename), drives `agg_status` / `representative_run` / snoozed-row aggregate from `status_runs`, and tracks `cur_run_ids` + `notif_agg` for transition detection from `notif_runs`. Stored `_prev_statuses[sub_key]` now tracks the notif aggregate (which may diverge from the displayed row status when the two ignore sets differ). Documented next to `extra_workflows` in `config.template.yaml`.

@@ -2,7 +2,14 @@ name: Daily Build
 
 on:
   schedule:
+    # Retries: if the first run is starved of a runner (or otherwise fails
+    # transiently), the next cron fires an hour later. The _release.yml
+    # `check` job is idempotent — once today's release exists, HEAD ==
+    # last release's target_commitish, so `should_build=false` and the
+    # retry exits clean without rebuilding.
     - cron: "0 5 * * *"
+    - cron: "0 6 * * *"
+    - cron: "0 7 * * *"
   workflow_dispatch:
 
 permissions:
